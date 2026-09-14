@@ -1,7 +1,7 @@
 From 27098ce374220832d6b3a76ac60548c4e3a88c05 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 28 Jul 2026 19:16:47 -0500
-Subject: [PATCH 22/52] kaiair: full Cantelli sigma sqrt(Var[S]+Var[NI]) per
+Subject: [PATCH 22/53] kaiair: full Cantelli sigma sqrt(Var[S]+Var[NI]) per
  pktR_CR Eq.(2)/ch.4; LDP-composed DL BLER target; ul_sinr_target_db telemetry
 
 - pktr_link_state now tracks signal-side EWMA mean/var alongside NI; sigma_sinr_db()

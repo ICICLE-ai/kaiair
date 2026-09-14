@@ -1,7 +1,7 @@
 From 2edc579832c624ddb627a8aff1e0c5085065dbcb Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 14:04:38 -0500
-Subject: [PATCH 37/52] kaiair: include the private-IE header at file scope
+Subject: [PATCH 37/53] kaiair: include the private-IE header at file scope
  (was inside the xnap namespace)
 
 ---

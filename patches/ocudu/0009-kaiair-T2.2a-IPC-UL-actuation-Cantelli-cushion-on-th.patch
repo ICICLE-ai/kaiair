@@ -1,7 +1,7 @@
 From 5ec6e371f62721c8ba3b098748b836ce613a525a Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 27 Jun 2026 17:53:38 -0500
-Subject: [PATCH 09/52] kaiair: T2.2a, IPC-UL actuation (Cantelli cushion on
+Subject: [PATCH 09/53] kaiair: T2.2a, IPC-UL actuation (Cantelli cushion on
  the stock TPC target)
 
 First closed-loop PktR actuation (UL, Tier-A, gNB-only). The stock PUSCH

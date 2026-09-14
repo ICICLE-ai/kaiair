@@ -1,7 +1,7 @@
 From dca2d5fdc0ba084d6bd3aaed44c569b1d66d924a Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 15:09:22 -0500
-Subject: [PATCH 41/52] kaiair: cellsToAddModList lists only the serving cell's
+Subject: [PATCH 41/53] kaiair: cellsToAddModList lists only the serving cell's
  configured ncells
 
 ---

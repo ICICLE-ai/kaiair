@@ -1,7 +1,7 @@
 From cc9ee350856875618658f4cce82f17c6476aed72 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 16:18:53 -0500
-Subject: [PATCH 44/52] kaiair: map log via pre-formatted string
+Subject: [PATCH 44/53] kaiair: map log via pre-formatted string
 
 ---
  .../cell_meas_manager/cell_meas_manager_impl.cpp  | 15 ++++++++-------

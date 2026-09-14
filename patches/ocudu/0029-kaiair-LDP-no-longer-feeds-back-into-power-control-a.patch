@@ -1,7 +1,7 @@
 From a17294f5c8e6359d77b666a9686534fb3a1bda91 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 17:46:37 -0500
-Subject: [PATCH 29/52] kaiair: LDP no longer feeds back into power control
+Subject: [PATCH 29/53] kaiair: LDP no longer feeds back into power control
  (align with LDP-TR)
 
 The paper's direction is p -> X: power control holds the per-transmission

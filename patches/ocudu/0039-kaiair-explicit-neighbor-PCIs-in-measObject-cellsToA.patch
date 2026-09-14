@@ -1,7 +1,7 @@
 From ff66c68f472a1c039a125b303f9b5e9d1ac0e0d6 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 14:30:13 -0500
-Subject: [PATCH 39/52] kaiair: explicit neighbor PCIs in measObject
+Subject: [PATCH 39/53] kaiair: explicit neighbor PCIs in measObject
  cellsToAddModList for regular meas configs (OAI nrUE needs them)
 
 ---

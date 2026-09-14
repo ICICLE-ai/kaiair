@@ -1,7 +1,7 @@
 From 448570c72f65f611fccdc71507661572a5e17260 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 27 Jun 2026 16:36:47 -0500
-Subject: [PATCH 08/52] kaiair: T0.3, runtime-tunable PktR knobs via
+Subject: [PATCH 08/53] kaiair: T0.3, runtime-tunable PktR knobs via
  KAIAIR_PKTR_* env
 
 Make gamma, beta, the interference-EWMA memory c, and the regime-transition

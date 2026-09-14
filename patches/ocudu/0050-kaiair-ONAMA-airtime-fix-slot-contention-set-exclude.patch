@@ -1,7 +1,7 @@
 From 97343509d9d8074efbd35e7221e90c873652b000 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 12 Sep 2026 00:23:36 -0500
-Subject: [PATCH 50/52] kaiair: ONAMA airtime fix, slot-contention set excludes
+Subject: [PATCH 50/53] kaiair: ONAMA airtime fix, slot-contention set excludes
  own-cell links and the other TDD direction (onama_conflict_set); 2-cell
  mutual conflict now yields the correct emergent ~1/2 share (was ~1/3 via the
  phantom own-UL/DL entry); share stays 1/(|set|+1) so a 3rd cell automatically

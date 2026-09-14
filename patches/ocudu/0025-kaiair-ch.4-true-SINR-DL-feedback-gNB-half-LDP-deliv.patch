@@ -1,7 +1,7 @@
 From 527e0141e3d0d277222db071d152e494e48f3fef Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 12:24:30 -0500
-Subject: [PATCH 25/52] kaiair: ch.4 true-SINR DL feedback (gNB half) + LDP
+Subject: [PATCH 25/53] kaiair: ch.4 true-SINR DL feedback (gNB half) + LDP
  delivery metrics
 
 - 10-bit custom PUCCH CSI decode (decode_csi_10b_whole_reverse equivalent) in

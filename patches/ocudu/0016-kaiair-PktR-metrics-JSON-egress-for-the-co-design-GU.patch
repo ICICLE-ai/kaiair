@@ -1,7 +1,7 @@
 From b590ba1c59814166fc6cb7380f59d775e1d66c7a Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 13 Jul 2026 17:13:52 -0500
-Subject: [PATCH 16/52] kaiair: PktR metrics JSON egress for the co-design GUI
+Subject: [PATCH 16/53] kaiair: PktR metrics JSON egress for the co-design GUI
  (step 3)
 
 The metrics view now emits one machine-readable telemetry record per interval to

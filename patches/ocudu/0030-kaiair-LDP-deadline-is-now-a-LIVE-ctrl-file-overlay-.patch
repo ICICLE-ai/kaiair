@@ -1,7 +1,7 @@
 From efb0ac4031318d27367855a7ebcd2fce632eae51 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 18:50:10 -0500
-Subject: [PATCH 30/52] kaiair: LDP deadline is now a LIVE ctrl-file overlay
+Subject: [PATCH 30/53] kaiair: LDP deadline is now a LIVE ctrl-file overlay
  (ldp_deadline_ms), no restarts
 
 The GUI LDP toggle previously restarted the agent + gNB; the dashboard's

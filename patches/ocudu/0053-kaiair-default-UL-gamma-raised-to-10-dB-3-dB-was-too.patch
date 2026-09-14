@@ -1,0 +1,46 @@
+From 681b0a3a7d577a25343a57b9f80a6937c7bb7fb6 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 14 Sep 2026 14:16:37 -0500
+Subject: [PATCH 53/53] kaiair: default UL gamma raised to 10 dB, 3 dB was too
+ small an operating point
+
+---
+ lib/scheduler/kaiair/pktr_ipc.h            | 2 +-
+ lib/scheduler/kaiair/pktr_runtime_config.h | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_ipc.h b/lib/scheduler/kaiair/pktr_ipc.h
+index 3a175f5d95..3559140910 100644
+--- a/lib/scheduler/kaiair/pktr_ipc.h
++++ b/lib/scheduler/kaiair/pktr_ipc.h
+@@ -44,7 +44,7 @@ namespace kaiair {
+ /// Static configuration for the PktR power-control loop.
+ struct pktr_config {
+   /// Required SINR margin gamma (dB).
+-  float gamma_db = 3.0F;
++  float gamma_db = 10.0F;
+   /// Target reliability beta in (0, 1). Bench default 0.9 (k=3): 0.99 (k~10) over-inflates the
+   /// Cantelli cushion at the testbed's SINR jitter and pins the loop at max power.
+   float beta = 0.9F;
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index 52da56db2a..52bc03a716 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -184,7 +184,7 @@ inline const char* ctrl_file_path()
+ struct live_controls_t {
+   std::atomic<bool>      active{false};   // has the control file been read at least once?
+   std::atomic<bool>      power{false};    // codesign AND power_control
+-  std::atomic<float>     gamma_db{3.0F};  // sinr_target_db
++  std::atomic<float>     gamma_db{10.0F};  // sinr_target_db
+   // KaiAir/PktR DL-SINR: separate DL SINR-target margin (dl_sinr_target_db in the ctrl file). NaN until the
+   // key appears, so an old ctrl file without it falls back to the env value.
+   std::atomic<float>     dl_gamma_db{NAN};
+@@ -275,7 +275,7 @@ inline void refresh_live_controls()
+   const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+   const bool        codesign = json_bool(s, "codesign", false);
+   const bool        power    = json_bool(s, "power_control", false);
+-  const float       gamma    = json_float(s, "sinr_target_db", 3.0F);
++  const float       gamma    = json_float(s, "sinr_target_db", 10.0F);
+   L.power.store(codesign and power, std::memory_order_relaxed);
+   L.gamma_db.store(gamma, std::memory_order_relaxed);
+   // KaiAir/PktR DL-SINR: the DL target has its own slider; NaN fallback keeps env when the key is absent.

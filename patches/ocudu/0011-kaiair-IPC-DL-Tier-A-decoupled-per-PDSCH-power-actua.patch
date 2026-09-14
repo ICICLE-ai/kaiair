@@ -1,7 +1,7 @@
 From 6df3f4655cc53e8a1e16e386b1da74bfd9bdaab5 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 29 Jun 2026 12:03:05 -0500
-Subject: [PATCH 11/52] kaiair: IPC-DL Tier-A, decoupled per-PDSCH power
+Subject: [PATCH 11/53] kaiair: IPC-DL Tier-A, decoupled per-PDSCH power
  actuator + HARQ-ACK closed loop
 
 Adds the gNB-only (Tier-A) downlink power-control path for PktR, in two

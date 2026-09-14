@@ -1,7 +1,7 @@
 From 81956dfdc500f7277ebb8dd720e06f640186150e Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Thu, 20 Aug 2026 19:01:08 -0500
-Subject: [PATCH 36/52] kaiair: live er_gate ctrl-file overlay, UL ONAMA gate
+Subject: [PATCH 36/53] kaiair: live er_gate ctrl-file overlay, UL ONAMA gate
  in can_allocate_pusch
 
 ---

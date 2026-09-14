@@ -52,7 +52,7 @@ DEFAULTS = {
 DEFAULT_CTRL = {
     "codesign": False,        # master KaiAir enable (off => stock scheduler/power)
     "power_control": False,   # PktR power actuation (UL + DL)
-    "sinr_target_db": 3.0,    # required SINR margin gamma / target (UL)
+    "sinr_target_db": 10.0,    # required SINR margin gamma / target (UL)
     "dl_sinr_target_db": 10.0, # KaiAir DL-SINR: separate DL SINR target gamma_DL
     "ldp_deadline_ms": 0.0,   # KaiAir LDP: live deadline toggle (0 = off), no gNB restart needed
     "er_gate": "observe",     # KaiAir multi-cell ER gate: off | observe | enforce (applied at gNB launch)
@@ -101,7 +101,7 @@ def ctrl_to_env(ctrl):
         env["KAIAIR_PKTR_ACTUATE"] = "1" if on else "0"
         env["KAIAIR_PKTR_DL_ACTUATE"] = "1" if on else "0"
         env["KAIAIR_PKTR_DL_LOOP"] = "1" if on else "0"
-        env["KAIAIR_PKTR_GAMMA_DB"] = str(ctrl.get("sinr_target_db", 3.0))
+        env["KAIAIR_PKTR_GAMMA_DB"] = str(ctrl.get("sinr_target_db", 10.0))
         # KaiAir multi-cell (plan B1-B5): DL true-SINR feedback, peer-bus snapshot file, ER gate mode,
         # SSB power and the cell PCI come from the agent config so a GUI-driven restart can never
         # silently drop them (the 2026-08-11 'powers off' bug).

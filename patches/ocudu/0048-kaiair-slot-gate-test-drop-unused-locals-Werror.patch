@@ -1,7 +1,7 @@
 From e53388f2c37a96378f0c4ccc65718f9d63c0de57 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 26 Aug 2026 23:11:43 -0500
-Subject: [PATCH 48/52] kaiair: slot-gate test, drop unused locals (-Werror)
+Subject: [PATCH 48/53] kaiair: slot-gate test, drop unused locals (-Werror)
 
 ---
  tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp | 5 +----

@@ -1,7 +1,7 @@
 From a1e8c7345fc82988dedecff20992158f3be324e9 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 16:10:24 -0500
-Subject: [PATCH 42/52] kaiair: store measurement reports even without serving
+Subject: [PATCH 42/53] kaiair: store measurement reports even without serving
  RSRP; rate-limited map log; store counters in JSON
 
 ---

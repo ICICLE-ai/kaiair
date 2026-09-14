@@ -1,7 +1,7 @@
 From a0b7c0f368db65f758ea7116d4e1d6d270b06730 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Thu, 30 Jul 2026 13:29:00 -0500
-Subject: [PATCH 23/52] kaiair: LDP deadline abandonment - stale retxs
+Subject: [PATCH 23/53] kaiair: LDP deadline abandonment - stale retxs
  cancelled, slots go to new data (T-LDP.2 increments 1+2)
 
 - base_harq_process gains kaiair_slot_first_tx (packet age reference; slot_tx moves per retx).

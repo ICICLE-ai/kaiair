@@ -1,7 +1,7 @@
 From 033f7de9eb738a8ff6b9ffde96069c9844713881 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sun, 26 Jul 2026 12:16:14 -0500
-Subject: [PATCH 19/52] kaiair: auto-feed T1.4 (in-cell half), GRK runs on the
+Subject: [PATCH 19/53] kaiair: auto-feed T1.4 (in-cell half), GRK runs on the
  live signal map
 
 The metrics view now maintains a pktr_signal_map fed every interval from the UE's

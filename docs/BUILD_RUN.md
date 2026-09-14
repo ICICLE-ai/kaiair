@@ -129,7 +129,7 @@ UL SINR statistics are only meaningful under UL traffic. Keep a light keepalive 
    then restore them.
    Attach order and a few dB of TX asymmetry decide which cell a free UE
    picks. Check the UE's serving PCI and retry if it camped wrong.
-4. Coordination runs by itself from there. Measurement reports
-   travel over Xn, exclusion regions and conflicts form when there is actual load,
-   and the gate mode is switched live per cell
+4. Coordination runs by itself from there. Measurement reports feed each gNB over RRC,
+   the link records travel between gNBs over Xn, exclusion regions and conflicts form
+   when there is actual load, and the gate mode is switched live per cell
    (`off` / `observe` / `enforce`) through the agent.

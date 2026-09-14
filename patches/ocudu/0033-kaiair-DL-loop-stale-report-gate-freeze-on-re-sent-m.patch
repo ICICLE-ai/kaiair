@@ -1,7 +1,7 @@
 From 33178874d259cc1549797e2a6c94978a472e48d2 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 12 Aug 2026 18:15:34 -0500
-Subject: [PATCH 33/52] kaiair: DL loop stale-report gate, freeze on re-sent
+Subject: [PATCH 33/53] kaiair: DL loop stale-report gate, freeze on re-sent
  measurements (sparse-traffic limit cycle)
 
 The UE re-reports its last measurement between PDSCH arrivals; with only

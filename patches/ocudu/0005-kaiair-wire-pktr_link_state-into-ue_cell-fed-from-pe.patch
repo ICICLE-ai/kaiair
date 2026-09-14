@@ -1,7 +1,7 @@
 From 01b0bd0438887b77602e3267707dc8390022f34d Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 24 Jun 2026 11:38:20 -0500
-Subject: [PATCH 05/52] kaiair: wire pktr_link_state into ue_cell, fed from
+Subject: [PATCH 05/53] kaiair: wire pktr_link_state into ue_cell, fed from
  per-packet UL CRC
 
 ue_cell now owns a pktr_link_state (by value, one per UE-per-cell link) and feeds it

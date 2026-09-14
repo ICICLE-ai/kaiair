@@ -1,7 +1,7 @@
 From 7d0ceee850a706a0ae26e78d4af172aa8aa1a586 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 26 Aug 2026 12:01:43 -0500
-Subject: [PATCH 46/52] kaiair: phase-1 UL interference coordination,
+Subject: [PATCH 46/53] kaiair: phase-1 UL interference coordination,
  gNB-receiver exclusion regions via TDD reciprocity, UL conflict links, UL
  ONAMA masks (can_allocate_pusch goes live), ulink Xn rows, JSON fields, unit
  test

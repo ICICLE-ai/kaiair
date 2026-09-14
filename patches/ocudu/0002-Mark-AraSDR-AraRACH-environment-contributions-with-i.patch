@@ -1,7 +1,7 @@
 From dcb940cb96d59ec29f22eb922d8f2d35a0f80b9d Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 22 Jun 2026 12:50:23 -0500
-Subject: [PATCH 02/52] Mark AraSDR/AraRACH environment contributions with
+Subject: [PATCH 02/53] Mark AraSDR/AraRACH environment contributions with
  inline comments
 
 Wrap each AraSDR/AraRACH RF/TDD adaptation region with

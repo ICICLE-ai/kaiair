@@ -1,7 +1,7 @@
 From 798d17d9feaae24d027694af62ce8687e056dfa1 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 17:10:24 -0500
-Subject: [PATCH 28/52] kaiair: UL LDP delivery gate, exclude attach phase via
+Subject: [PATCH 28/53] kaiair: UL LDP delivery gate, exclude attach phase via
  fallback mode, not slice id
 
 Bench-observed: UL grants are not reliably slice-attributed (steady-state UL data

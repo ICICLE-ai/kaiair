@@ -1,7 +1,7 @@
 From 864347db7db7c45bbea4205cc5b0a6b1ced885d3 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 24 Jun 2026 11:33:36 -0500
-Subject: [PATCH 04/52] kaiair: add pktr_link_state, per-link EWMA interference
+Subject: [PATCH 04/53] kaiair: add pktr_link_state, per-link EWMA interference
  statistics (UL)
 
 Header-only per-link store for the receiver-side interference+noise NI = RSRP - SINR,

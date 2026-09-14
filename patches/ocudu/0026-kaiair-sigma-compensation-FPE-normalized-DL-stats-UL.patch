@@ -1,7 +1,7 @@
 From d44a80cefd03d50d9cd28408cc6b26cffa97d8ba Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 15:31:25 -0500
-Subject: [PATCH 26/52] kaiair: sigma compensation (FPE-normalized DL stats),
+Subject: [PATCH 26/53] kaiair: sigma compensation (FPE-normalized DL stats),
  UL LDP delivery counters, UL cushion floor
 
 - DL sigma estimator now measures the CHANNEL, not the controller: reports are

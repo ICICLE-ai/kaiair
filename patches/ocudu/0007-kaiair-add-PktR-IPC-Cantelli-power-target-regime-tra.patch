@@ -1,7 +1,7 @@
 From ea9d5e7da6611343ecf57b80c60f73027ce11ae3 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 27 Jun 2026 16:12:06 -0500
-Subject: [PATCH 07/52] kaiair: add PktR IPC (Cantelli power target) +
+Subject: [PATCH 07/53] kaiair: add PktR IPC (Cantelli power target) +
  regime-transition-aware view
 
 Phase 2 (compute + display only, no scheduler actuation):

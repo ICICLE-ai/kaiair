@@ -1,7 +1,7 @@
 From 841af17ff7f3331622358bfd11c28d6362d200d0 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 14 Sep 2026 09:41:15 -0500
-Subject: [PATCH 52/52] kaiair: tidy module header comments
+Subject: [PATCH 52/53] kaiair: tidy module header comments
 
 ---
  include/ocudu/kaiair/pktr_neighbor_store.h    | 23 ++++-------

@@ -1,7 +1,7 @@
 From c69040800bfbb9c37ca637a88871c202383df709 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 16:47:23 -0500
-Subject: [PATCH 27/52] kaiair: rename DL-feedback naming, drop 'ch4' tokens
+Subject: [PATCH 27/53] kaiair: rename DL-feedback naming, drop 'ch4' tokens
  (env KAIAIR_DL_SINR_CSI*, [KaiAir DL-SINR] logs, dissertation-cited
  comments); UL LDP gate debug print
 
