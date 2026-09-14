@@ -1,0 +1,65 @@
+From 9a96a58a50208f85294c17e78906cf0f9de7fcff Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 12 Sep 2026 19:15:15 -0500
+Subject: [PATCH 51/52] kaiair: global slot index derived fresh from the PTP
+ wall clock every call, the once-latched offset went stale when slot_point
+ wrapped (20480 slots / 10.24 s), silently divergent cross-cell ONAMA masks by
+ the cells' start-time difference; wrap regression test
+
+---
+ lib/scheduler/kaiair/pktr_slot_gate.h           | 17 ++++++++++-------
+ .../scheduler/kaiair/pktr_slot_gate_test.cpp    | 13 ++++++++++---
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_slot_gate.h b/lib/scheduler/kaiair/pktr_slot_gate.h
+index f97e76df2e..6bfa859c25 100644
+--- a/lib/scheduler/kaiair/pktr_slot_gate.h
++++ b/lib/scheduler/kaiair/pktr_slot_gate.h
+@@ -110,14 +110,17 @@ inline link_slot_mask compute_link_mask(uint32_t                     link_id,
+ /// slot_dur_ns defaults to 500000 (0.5 ms slot, 30 kHz SCS / numerology 1).
+ inline uint64_t kaiair_global_slot_base(uint32_t local_now, long long wall_ns, long long slot_dur_ns = 500000)
+ {
+-  static long long s_offset = 0;
+-  static bool       s_set   = false;
+-  if (!s_set && wall_ns > 0) {
+-    const long long global_now = wall_ns / slot_dur_ns;
+-    s_offset                   = global_now - static_cast<long long>(local_now);
+-    s_set                      = true;
++  // Derived FRESH on every call, never latched. The local counter (slot_point::count()) WRAPS
++  // every 1024 frames (20480 slots / 10.24 s at 30 kHz), so a once-latched offset goes stale at
++  // the first wrap and two cells then disagree by exactly their start-time difference, the very
++  // cross-cell misalignment this mapping exists to prevent (bench 2026-09-12: enforce starved the
++  // lower-margin cell while PTP was verified perfect, 0 +/- 19 us). Both the radio slot clock
++  // (OctoClock 10 MHz/PPS) and the wall clock (PTP) advance at true time, so the instantaneous
++  // quotient IS the global index of the current slot; mask windows only ever need base + i.
++  if (wall_ns <= 0) {
++    return local_now; // unit tests / single-cell fallback: local numbering
+   }
+-  return static_cast<uint64_t>(static_cast<long long>(local_now) + s_offset);
++  return static_cast<uint64_t>(wall_ns / slot_dur_ns);
+ }
+ 
+ /// Fraction of slots a link is active over a window (for telemetry / the concurrency metric).
+diff --git a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+index e21fcfa09a..c9ef41f6ee 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+@@ -108,8 +108,15 @@ TEST(pktr_slot_gate_test, global_slot_base_offset_is_consistent)
+   const long long wall_ns  = 2000000000000LL;
+   const long long slot_dur = 500000;
+   const uint64_t  base863  = kaiair_global_slot_base(863, wall_ns, slot_dur);
+-  // Same process, later call with an advanced local counter -> global advances by the same delta.
+-  const uint64_t  base900  = kaiair_global_slot_base(900, wall_ns, slot_dur);
++  EXPECT_EQ(base863, static_cast<uint64_t>(wall_ns / slot_dur)); // global depends only on wall time
++  // Time advances 37 slots: BOTH clocks move together -> global advances by the same delta.
++  const uint64_t base900 = kaiair_global_slot_base(900, wall_ns + 37 * slot_dur, slot_dur);
+   EXPECT_EQ(base900 - base863, 37u);
+-  EXPECT_EQ(base863, static_cast<uint64_t>(wall_ns / slot_dur)); // first call latches the offset
++  // WRAP REGRESSION (the 2026-09-12 starvation bug): the local slot counter wraps every 20480
++  // slots (10.24 s at 30 kHz). Two cells at the SAME wall instant, one just wrapped (local 5) and
++  // one not (local 20470), MUST still agree on the global index, a latched local+offset scheme
++  // diverges by 20480 here.
++  const uint64_t g_wrapped   = kaiair_global_slot_base(5, wall_ns + 1000 * slot_dur, slot_dur);
++  const uint64_t g_unwrapped = kaiair_global_slot_base(20470, wall_ns + 1000 * slot_dur, slot_dur);
++  EXPECT_EQ(g_wrapped, g_unwrapped);
+ }

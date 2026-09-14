@@ -1,0 +1,32 @@
+From c6e8e82a667e08e0f81247acad3a16d055981bfb Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 15:52:05 -0500
+Subject: [PATCH 11/12] kaiair: OAI UE neighbor search, full-frame window until
+ the first valid measurement
+
+---
+ openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+index 7dd2c5ca3f..5b6dabb15a 100644
+--- a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
++++ b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+@@ -299,8 +299,16 @@ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
+   pss_detection_result_t pss_res = pss_search_time_nr(&p_pss);
+ 
+   if (!pss_res.success) {
+-    if (neighboring_cell_info->valid_meas)
++    if (neighboring_cell_info->valid_meas) {
+       neighboring_cell_info->consec_fail++;
++    } else {
++      // KaiAir: a neighbor that has NEVER been measured must be searched over a full frame every
++      // time. Stock code only widens the window after NEIGHBOR_CELL_MAX_CONSECUTIVE_FAILURES, but
++      // consec_fail is only counted once valid_meas is set -> a stale 32-sample window (seen on the
++      // bench: start~126000 len=32, peak=0) never recovers and the cell is never found.
++      neighboring_cell_info->pss_search_start = 0;
++      neighboring_cell_info->pss_search_length = frame_parms->samples_per_frame + (2 * frame_parms->ofdm_symbol_size);
++    }
+     // KaiAir: neighbor-search visibility (rate-limited), the multi-cell exclusion region needs these
+     // measurements, so a silent PSS failure must be diagnosable without PHY debug logging.
+     static unsigned kaiair_nbr_fail_count = 0;

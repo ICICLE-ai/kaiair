@@ -1,0 +1,180 @@
+From a0b7c0f368db65f758ea7116d4e1d6d270b06730 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Thu, 30 Jul 2026 13:29:00 -0500
+Subject: [PATCH 23/52] kaiair: LDP deadline abandonment - stale retxs
+ cancelled, slots go to new data (T-LDP.2 increments 1+2)
+
+- base_harq_process gains kaiair_slot_first_tx (packet age reference; slot_tx moves per retx).
+- ldp_deadline_slots(cfg, slots_per_ms) converts the LDP deadline to the cell numerology.
+- Both intra-slice retx loops abandon (cancel_retxs) any pending retx whose packet age
+  exceeds the deadline, per LDP-TR Definition 1 (post-deadline packets are dropped).
+- HW-verified on the bench (KAIAIR_PKTR_DEADLINE_MS=10): abandonments fire at age 30
+  slots >= 20-slot deadline with the link healthy. Bench truth: first UL retx opportunity
+  on the P5 TDD config is ~15 ms after first tx, so ldp retx_interval_ms should be set
+  ~15 (env KAIAIR_PKTR_RETX_MS) for an honest N(D) budget.
+- 8/8 LDP unit tests pass.
+---
+ lib/scheduler/cell/cell_harq_manager.cpp      |  1 +
+ lib/scheduler/cell/cell_harq_manager.h        |  5 ++
+ lib/scheduler/kaiair/pktr_ldp.h               | 12 +++++
+ .../ue_scheduling/intra_slice_scheduler.cpp   | 53 +++++++++++++++++++
+ .../scheduler/kaiair/pktr_ldp_test.cpp        | 13 +++++
+ 5 files changed, 84 insertions(+)
+
+diff --git a/lib/scheduler/cell/cell_harq_manager.cpp b/lib/scheduler/cell/cell_harq_manager.cpp
+index 6f473cc772..0c3b5a358a 100644
+--- a/lib/scheduler/cell/cell_harq_manager.cpp
++++ b/lib/scheduler/cell/cell_harq_manager.cpp
+@@ -291,6 +291,7 @@ typename cell_harq_repository<IsDl>::harq_type* cell_harq_repository<IsDl>::allo
+   h.status             = harq_state_t::waiting_ack;
+   h.slot_tx            = sl_tx;
+   h.slot_ack           = sl_ack;
++  h.kaiair_slot_first_tx = sl_tx; // KaiAir/PktR LDP: packet age reference (new TB starts here)
+   h.nof_retxs          = 0;
+   h.ndi                = !h.ndi;
+   h.max_nof_harq_retxs = max_nof_harq_retxs;
+diff --git a/lib/scheduler/cell/cell_harq_manager.h b/lib/scheduler/cell/cell_harq_manager.h
+index f65792ff8f..7cc0dde8bf 100644
+--- a/lib/scheduler/cell/cell_harq_manager.h
++++ b/lib/scheduler/cell/cell_harq_manager.h
+@@ -74,6 +74,9 @@ struct base_harq_process : public intrusive_double_linked_list_element<>,
+   uint8_t nof_retxs = 0;
+   /// Maximum number of retransmission before Transport Block is reset.
+   uint8_t max_nof_harq_retxs = 0;
++  /// KaiAir/PktR LDP: slot of the FIRST transmission of the current TB (slot_tx moves with every
++  /// retx). The deadline-abandonment check measures packet age from this slot.
++  slot_point kaiair_slot_first_tx;
+ };
+ 
+ /// Parameters of a DL HARQ process.
+@@ -213,6 +216,8 @@ public:
+   unsigned      nof_retxs() const { return impl->nof_retxs; }
+   bool          ndi() const { return impl->ndi; }
+   harq_mode_t   mode() const { return impl->mode; }
++  /// KaiAir/PktR LDP: slot of the first transmission of the current TB (packet age reference).
++  slot_point kaiair_first_tx_slot() const { return impl->kaiair_slot_first_tx; }
+ 
+   /// \brief Cancels any retransmissions for this HARQ process.
+   /// If the HARQ process has a pending retransmission, it is reset. If the ACK/CRC info has not been received yet, the
+diff --git a/lib/scheduler/kaiair/pktr_ldp.h b/lib/scheduler/kaiair/pktr_ldp.h
+index 979b63c2c4..4bd0b1740d 100644
+--- a/lib/scheduler/kaiair/pktr_ldp.h
++++ b/lib/scheduler/kaiair/pktr_ldp.h
+@@ -75,6 +75,18 @@ inline float ldp_achieved_pkt_reliability(float tx_reliability, unsigned nof_tx)
+   return 1.0F - std::pow(1.0F - p, static_cast<float>(n));
+ }
+ 
++/// Deadline expressed in slots for the serving cell numerology (slots_per_ms = 2^mu, i.e.
++/// slot_point::nof_slots_per_subframe()). 0 when LDP is disabled. This is the scheduler-side
++/// deadline the retx-abandonment check compares against (LDP-TR Definition 1: a packet not
++/// delivered within D is dropped -- its slots go to new data instead).
++inline unsigned ldp_deadline_slots(const ldp_config& cfg, unsigned slots_per_ms)
++{
++  if (cfg.deadline_ms <= 0.0F) {
++    return 0;
++  }
++  return static_cast<unsigned>(std::lround(cfg.deadline_ms * static_cast<float>(slots_per_ms)));
++}
++
+ /// The effective per-transmission beta the Cantelli loop should target. With LDP enabled
+ /// (deadline > 0) this is p_req(N(D)); otherwise the caller's static per-tx beta passes through.
+ /// This is the single composition point between LDP and the IPC power loop.
+diff --git a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+index 5066c99414..3768b2250d 100644
+--- a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
++++ b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+@@ -3,6 +3,7 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "intra_slice_scheduler.h"
++#include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR LDP: deadline-abandonment of stale retxs
+ #include "../logging/scheduler_metrics_handler.h"
+ #include "ocudu/ran/pdcch/search_space.h"
+ #include "ocudu/support/math/mod_math_utils.h"
+@@ -298,6 +299,33 @@ unsigned intra_slice_scheduler::schedule_dl_retx_candidates(dl_ran_slice_candida
+       // HARQ ReTx is for another slice.
+       continue;
+     }
++
++    // KaiAir/PktR LDP: deadline abandonment. A packet whose delivery deadline has already passed
++    // gets no further retx slots (LDP-TR Definition 1 drops post-deadline packets) - the slot goes
++    // to new data instead of being wasted on an already-late TB.
++    {
++      const auto& kaiair_ldp = kaiair::pktr_runtime().ldp;
++      if (kaiair_ldp.deadline_ms > 0.0F and h.kaiair_first_tx_slot().valid()) {
++        const unsigned kaiair_dl_slots =
++            kaiair::ldp_deadline_slots(kaiair_ldp, pdsch_slot.nof_slots_per_subframe());
++        if (static_cast<unsigned>(pdsch_slot - h.kaiair_first_tx_slot()) >= kaiair_dl_slots) {
++          if (kaiair::pktr_runtime().debug_tpc) {
++            fmt::print("[KaiAir/PktR LDP] rnti={:#06x} h_id={} DL retx ABANDONED: age {} slots >= "
++                       "deadline {} slots ({:.1f} ms), retx {}/{}\n",
++                       fmt::underlying(h.rnti()),
++                       fmt::underlying(h.id()),
++                       pdsch_slot - h.kaiair_first_tx_slot(),
++                       kaiair_dl_slots,
++                       kaiair_ldp.deadline_ms,
++                       h.nof_retxs(),
++                       h.max_nof_retxs());
++          }
++          h.cancel_retxs();
++          continue;
++        }
++      }
++    }
++
+     const slice_ue& u = slice_ues[h.ue_index()];
+     if (not can_allocate_pdsch(u, u.get_cc())) {
+       continue;
+@@ -346,6 +374,31 @@ unsigned intra_slice_scheduler::schedule_ul_retx_candidates(ul_ran_slice_candida
+     if (h.get_grant_params().slice_id != slice.id()) {
+       continue;
+     }
++
++    // KaiAir/PktR LDP: deadline abandonment (see the DL retx loop above for rationale).
++    {
++      const auto& kaiair_ldp = kaiair::pktr_runtime().ldp;
++      if (kaiair_ldp.deadline_ms > 0.0F and h.kaiair_first_tx_slot().valid()) {
++        const unsigned kaiair_ul_slots =
++            kaiair::ldp_deadline_slots(kaiair_ldp, pusch_slot.nof_slots_per_subframe());
++        if (static_cast<unsigned>(pusch_slot - h.kaiair_first_tx_slot()) >= kaiair_ul_slots) {
++          if (kaiair::pktr_runtime().debug_tpc) {
++            fmt::print("[KaiAir/PktR LDP] rnti={:#06x} h_id={} UL retx ABANDONED: age {} slots >= "
++                       "deadline {} slots ({:.1f} ms), retx {}/{}\n",
++                       fmt::underlying(h.rnti()),
++                       fmt::underlying(h.id()),
++                       pusch_slot - h.kaiair_first_tx_slot(),
++                       kaiair_ul_slots,
++                       kaiair_ldp.deadline_ms,
++                       h.nof_retxs(),
++                       h.max_nof_retxs());
++          }
++          h.cancel_retxs();
++          continue;
++        }
++      }
++    }
++
+     const slice_ue& u = slice_ues[h.ue_index()];
+ 
+     if (not can_allocate_pusch(u, u.get_cc())) {
+diff --git a/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp b/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+index 4719e6fce6..1e0cc64705 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+@@ -92,3 +92,16 @@ TEST(pktr_ldp_test, disabled_passthrough)
+   ldp_config cfg; // deadline_ms = 0
+   EXPECT_NEAR(ldp_effective_tx_beta(cfg, 0.9F), 0.9F, 1e-6F);
+ }
++
++// Deadline -> slot budget for the scheduler-side abandonment check (numerology 1: 2 slots/ms).
++TEST(pktr_ldp_test, deadline_slots_conversion)
++{
++  ldp_config cfg;
++  cfg.deadline_ms = 10.0F;
++  EXPECT_EQ(ldp_deadline_slots(cfg, 2), 20U); // mu=1
++  EXPECT_EQ(ldp_deadline_slots(cfg, 1), 10U); // mu=0
++  cfg.deadline_ms = 7.5F;
++  EXPECT_EQ(ldp_deadline_slots(cfg, 2), 15U);
++  cfg.deadline_ms = 0.0F; // disabled -> no budget
++  EXPECT_EQ(ldp_deadline_slots(cfg, 2), 0U);
++}

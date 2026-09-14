@@ -1,0 +1,265 @@
+From 8b8d5289ec1ea9c56d4334c16a8e49dee06dfc21 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 6 Jul 2026 14:43:39 -0500
+Subject: [PATCH 13/52] kaiair: PktR signal (gain) map, feeds GRK
+ exclusion-region sizing (Phase 1, T1.3)
+
+The "who-hears-whom" gain map GRK runs on. Path gains G(tx,rx) = rx_reference_power
+- tx_power (dB), EWMA-smoothed, keyed per ordered (tx,rx) pair; per-node tx power +
+activity held alongside. Gains come from reference signals (RSRP + PHR in-cell,
+neighbour SSB-RSRP cross-cell via reciprocity), never the aggregate SINR.
+
+- lib/scheduler/kaiair/pktr_signal_map.h: update_gain(), set_node(), gain_db(),
+  candidates_for(rx, intended) -> grk_interferer rows ready for
+  pktr_grk::size_exclusion_region.
+- pktr_signal_map_test.cpp: 6 tests incl. a 2-cell end-to-end (UE_B interfering at
+  gNB_A over budget -> excluded, K = G_TR - G_CR). All 6 PktR suites pass.
+
+A fixed dBFS<->dBm RX offset cancels in the GRK gain ratio K, so the ER is correct
+with relative gains. Not yet wired into the metrics view (Step 3 / T3.4).
+---
+ lib/scheduler/kaiair/pktr_signal_map.h        | 120 ++++++++++++++++++
+ .../unittests/scheduler/kaiair/CMakeLists.txt |   4 +
+ .../scheduler/kaiair/pktr_signal_map_test.cpp |  94 ++++++++++++++
+ 3 files changed, 218 insertions(+)
+ create mode 100644 lib/scheduler/kaiair/pktr_signal_map.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_signal_map_test.cpp
+
+diff --git a/lib/scheduler/kaiair/pktr_signal_map.h b/lib/scheduler/kaiair/pktr_signal_map.h
+new file mode 100644
+index 0000000000..f235d68ceb
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_signal_map.h
+@@ -0,0 +1,120 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, the signal (gain) map: the "who-hears-whom" table the GRK exclusion-region
++// computation runs on. It stores, per ordered pair (transmitter, receiver), the path gain
++//
++//   G(tx, rx) = (received power of tx's reference signal) - (tx's transmit power)   [dB],
++//
++// smoothed with an EWMA because path gains vary slowly. Crucially, gains come from *reference
++// signals* (each tied to a known transmitter at a known power), never from the aggregate data
++// SINR, that is what makes them per-link and separable:
++//   - in-cell UL  G(UE->gNB): PUSCH/SRS RSRP + UE TX power (from PHR),
++//   - in-cell DL  G(gNB->UE): SSB/CSI-RSRP reported by the UE,
++//   - cross-cell  G(UE_u->gNB_B): neighbour-cell SSB-RSRP via TDD reciprocity.
++//
++// The map exposes candidate interferer lists (grk_interferer rows) for a receiver, which feed
++// pktr_grk::size_exclusion_region directly. Per-node transmit power and activity factor (from
++// scheduling statistics) are held alongside the gains so a candidate row is fully populated.
++//
++// Units note: rx_power and tx_power must be in consistent units per call. A fixed dBFS<->dBm
++// calibration offset on the RX chain cancels in the GRK gain *ratio* K = G(T,R)/G(C,R), so the
++// exclusion region is correct even with uncalibrated (relative) gains; only absolute-dBm claims
++// would need the offset.
++
++#pragma once
++
++#include "pktr_grk.h"
++#include "pktr_link_state.h" // default_ewma_c
++#include <cstdint>
++#include <map>
++#include <optional>
++#include <utility>
++#include <vector>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Per-transmitter attributes used to populate a candidate interferer row (from scheduling stats).
++struct pktr_node_state {
++  /// Expected / most-recent transmit power (dBm), used as E[P_C].
++  float tx_power_db = 0.0F;
++  /// Activity factor in [0, 1] (fraction of resources on which the node transmits), used as E[alpha_C].
++  float activity = 1.0F;
++};
++
++/// The PktR gain map. One instance per scheduler; keyed by opaque node identifiers.
++class pktr_signal_map
++{
++public:
++  /// EWMA old-sample weight for gain smoothing. Gains are slow, so the default is stable (15/16).
++  explicit pktr_signal_map(float ewma_c = pktr_link_state::default_ewma_c) : c_(ewma_c) {}
++
++  /// Update the gain G(tx -> rx) from one reference measurement: the received reference power and the
++  /// transmitter's power, in consistent dB units. Path gain = rx_power_db - tx_power_db, EWMA-smoothed.
++  void update_gain(uint32_t tx_id, uint32_t rx_id, float rx_power_db, float tx_power_db)
++  {
++    const float gain = rx_power_db - tx_power_db;
++    auto [it, inserted] = gains_.try_emplace({tx_id, rx_id}, gain);
++    if (!inserted) {
++      it->second = c_ * it->second + (1.0F - c_) * gain; // EWMA
++    }
++  }
++
++  /// Set/refresh a node's transmit power (dBm) and activity factor (from scheduling statistics).
++  void set_node(uint32_t id, float tx_power_db, float activity)
++  {
++    nodes_[id] = {tx_power_db, activity};
++  }
++
++  /// Smoothed gain G(tx -> rx) in dB, or nullopt if that pair has never been measured.
++  std::optional<float> gain_db(uint32_t tx_id, uint32_t rx_id) const
++  {
++    auto it = gains_.find({tx_id, rx_id});
++    if (it == gains_.end()) {
++      return std::nullopt;
++    }
++    return it->second;
++  }
++
++  /// Node attributes, or nullopt if unknown.
++  std::optional<pktr_node_state> node(uint32_t id) const
++  {
++    auto it = nodes_.find(id);
++    if (it == nodes_.end()) {
++      return std::nullopt;
++    }
++    return it->second;
++  }
++
++  /// Build the candidate-interferer list for receiver \c rx_id: every known transmitter other than
++  /// \c intended_tx_id that has a gain to \c rx_id and a known node state, as a grk_interferer row
++  /// {G(tx,rx), E[P_tx], E[alpha_tx]}. Ready to pass to pktr_grk::size_exclusion_region.
++  std::vector<grk_interferer> candidates_for(uint32_t rx_id, uint32_t intended_tx_id) const
++  {
++    std::vector<grk_interferer> out;
++    for (const auto& [key, gain] : gains_) {
++      const uint32_t tx = key.first, rx = key.second;
++      if (rx != rx_id || tx == intended_tx_id) {
++        continue;
++      }
++      auto ns = node(tx);
++      if (!ns.has_value()) {
++        continue; // no TX-power/activity known for this interferer yet
++      }
++      out.push_back(grk_interferer{tx, gain, ns->tx_power_db, ns->activity});
++    }
++    return out;
++  }
++
++  /// Number of gain entries held (for diagnostics/tests).
++  std::size_t nof_gains() const { return gains_.size(); }
++
++private:
++  float c_; // EWMA old-sample weight
++  std::map<std::pair<uint32_t, uint32_t>, float> gains_; // (tx, rx) -> smoothed gain (dB)
++  std::map<uint32_t, pktr_node_state>            nodes_; // node id -> {tx power, activity}
++};
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index 98aaeda21c..7ed22fb77f 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -20,3 +20,7 @@ add_test(pktr_dl_power_controller_test pktr_dl_power_controller_test)
+ add_executable(pktr_grk_test pktr_grk_test.cpp)
+ target_link_libraries(pktr_grk_test ocudulog gtest gtest_main)
+ add_test(pktr_grk_test pktr_grk_test)
++
++add_executable(pktr_signal_map_test pktr_signal_map_test.cpp)
++target_link_libraries(pktr_signal_map_test ocudulog gtest gtest_main)
++add_test(pktr_signal_map_test pktr_signal_map_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_signal_map_test.cpp b/tests/unittests/scheduler/kaiair/pktr_signal_map_test.cpp
+new file mode 100644
+index 0000000000..ad353601e1
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_signal_map_test.cpp
+@@ -0,0 +1,94 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_signal_map.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++// Node id convention for the tests: cell A = {gNB 10, UE 11}, cell B = {gNB 20, UE 21}.
++static constexpr uint32_t GNB_A = 10, UE_A = 11, GNB_B = 20, UE_B = 21;
++
++// A single measurement yields path gain = rx_power - tx_power.
++TEST(pktr_signal_map_test, gain_is_rx_minus_tx)
++{
++  pktr_signal_map m;
++  m.update_gain(UE_A, GNB_A, /*rsrp=*/-26.0F, /*ue_tx=*/22.0F); // G(UE_A -> gNB_A)
++  ASSERT_TRUE(m.gain_db(UE_A, GNB_A).has_value());
++  EXPECT_NEAR(*m.gain_db(UE_A, GNB_A), -48.0F, 1e-4F);
++  EXPECT_FALSE(m.gain_db(GNB_A, UE_A).has_value()); // direction matters; reverse not set
++}
++
++// Repeated measurements are EWMA-smoothed toward the new value.
++TEST(pktr_signal_map_test, ewma_smooths_gain)
++{
++  pktr_signal_map m(/*ewma_c=*/0.5F);
++  m.update_gain(UE_A, GNB_A, -60.0F, 0.0F); // gain -60
++  m.update_gain(UE_A, GNB_A, -40.0F, 0.0F); // gain -40 -> 0.5*-60 + 0.5*-40 = -50
++  EXPECT_NEAR(*m.gain_db(UE_A, GNB_A), -50.0F, 1e-4F);
++}
++
++// candidates_for excludes the intended transmitter and needs node state to include an interferer.
++TEST(pktr_signal_map_test, candidates_exclude_intended_and_require_node_state)
++{
++  pktr_signal_map m;
++  m.update_gain(UE_A, GNB_A, -30.0F, 0.0F); // intended link at gNB_A
++  m.update_gain(UE_B, GNB_A, -50.0F, 0.0F); // cross-cell interferer at gNB_A
++  // No node state yet -> the interferer is dropped (incomplete row).
++  EXPECT_TRUE(m.candidates_for(GNB_A, UE_A).empty());
++  // With node state, UE_B appears; the intended UE_A never does.
++  m.set_node(UE_B, /*tx=*/0.0F, /*activity=*/1.0F);
++  m.set_node(UE_A, 0.0F, 1.0F);
++  const auto cands = m.candidates_for(GNB_A, UE_A);
++  ASSERT_EQ(cands.size(), 1u);
++  EXPECT_EQ(cands[0].id, UE_B);
++  EXPECT_NEAR(cands[0].gain_db, -50.0F, 1e-4F);
++}
++
++// End-to-end: a 2-cell scenario feeds the signal map into the GRK exclusion-region computation.
++// gNB_A serves UE_A; UE_B (cell B) interferes at gNB_A. If the interference exceeds the tolerable
++// budget, GRK must place UE_B in the exclusion region.
++TEST(pktr_signal_map_test, feeds_grk_two_cell)
++{
++  pktr_signal_map m;
++  // Intended link A: UE_A heard at -20 dB gain by gNB_A, TX 0 dBm.
++  m.update_gain(UE_A, GNB_A, /*rsrp=*/-20.0F, /*ue_tx=*/0.0F);
++  m.set_node(UE_A, 0.0F, 1.0F);
++  // Interferer: UE_B heard at -24 dB gain by gNB_A, TX 0 dBm, always active.
++  m.update_gain(UE_B, GNB_A, /*rsrp=*/-24.0F, /*ue_tx=*/0.0F);
++  m.set_node(UE_B, 0.0F, 1.0F);
++
++  const float signal_gain = *m.gain_db(UE_A, GNB_A); // G(T,R) = -20 dB
++  ASSERT_NEAR(signal_gain, -20.0F, 1e-4F);
++
++  // IPC budget: S=-20 dBm, sigma=1 dB, beta=0.9 (k=3), gamma=3 -> E_max = -20 - 3 - 3 = -26 dBm.
++  pktr_config cfg;
++  cfg.gamma_db      = 3.0F;
++  cfg.beta          = 0.9F;
++  const float e_max = max_tolerable_interference_db(/*S=*/-20.0F, /*sigma=*/1.0F, cfg);
++  ASSERT_NEAR(e_max, -26.0F, 1e-3F);
++
++  // UE_B's expected interference is -24 dBm (above the -26 dBm budget) -> must be excluded.
++  const grk_state st = size_exclusion_region(signal_gain, e_max, m.candidates_for(GNB_A, UE_A));
++  ASSERT_EQ(st.exclusion_region.size(), 1u);
++  EXPECT_EQ(st.exclusion_region[0], UE_B);
++  EXPECT_FLOAT_EQ(st.k_db, 4.0F); // K = G_TR - G_CR = -20 - (-24)
++}
++
++// A weak, distant interferer that fits under the budget is NOT excluded.
++TEST(pktr_signal_map_test, weak_interferer_not_excluded)
++{
++  pktr_signal_map m;
++  m.update_gain(UE_A, GNB_A, -20.0F, 0.0F);
++  m.set_node(UE_A, 0.0F, 1.0F);
++  m.update_gain(UE_B, GNB_A, -90.0F, 0.0F); // very weak: -90 dB
++  m.set_node(UE_B, 0.0F, /*activity=*/0.5F);
++
++  pktr_config cfg;
++  cfg.beta          = 0.9F;
++  const float e_max = max_tolerable_interference_db(-20.0F, 1.0F, cfg); // -26 dBm
++  const grk_state st = size_exclusion_region(*m.gain_db(UE_A, GNB_A), e_max, m.candidates_for(GNB_A, UE_A));
++  EXPECT_TRUE(st.exclusion_region.empty());
++  EXPECT_FLOAT_EQ(st.k_db, 0.0F);
++}

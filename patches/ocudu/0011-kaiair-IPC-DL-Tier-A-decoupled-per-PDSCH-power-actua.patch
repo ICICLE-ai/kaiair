@@ -1,0 +1,535 @@
+From 6df3f4655cc53e8a1e16e386b1da74bfd9bdaab5 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 29 Jun 2026 12:03:05 -0500
+Subject: [PATCH 11/52] kaiair: IPC-DL Tier-A, decoupled per-PDSCH power
+ actuator + HARQ-ACK closed loop
+
+Adds the gNB-only (Tier-A) downlink power-control path for PktR, in two
+increments, both validated on hardware (USRP X310, single UE).
+
+Increment 1, decoupled per-PDSCH actuator (env-gated):
+- Override pdsch.tx_pwr_info.pwr_ctrl_offset on the two C-RNTI data builders
+  INDEPENDENTLY of the CSI-RS RRC value, so the UE's CQI assumption is
+  unchanged (no confound). KAIAIR_PKTR_DL_ACTUATE / KAIAIR_PKTR_DL_PWR_OFFSET.
+- HW: moving the offset moves real delivered DL power (MCS24+15 collapsed the
+  link with the UE still told powerControlOffset=0). Boosting clips (the lower
+  PHY keeps ~12 dB PAPR headroom), so authority is shed-only, actuator output
+  is clamped to [0,15] (never negative -> never clips).
+
+Increment 2, closed loop (pktr_dl_power_controller):
+- Per-UE Robbins-Monro / OLLA-style controller driven by per-packet HARQ-ACK,
+  holding empirical DL BLER at the PktR target (1 - beta): ack -> shed,
+  nack -> add power; converges to BLER = 1 - beta. Fed from ue_cell
+  handle_dl_ack_info, applied per grant in ue_cell_grid_allocator.
+  KAIAIR_PKTR_DL_LOOP / KAIAIR_PKTR_DL_ETA / KAIAIR_PKTR_DL_NOMINAL_DB.
+- HW (beta=0.9): loop shed offset 0->15 and regulated DL delivery to ~90% (=beta)
+  vs ~96% over-provisioned with the loop off, same throughput, ~15 dB less power.
+
+Unit tests: pktr_dl_power_controller_test (7), pktr_runtime_config_test (+5 DL).
+---
+ .../kaiair/pktr_dl_power_controller.h         |  90 ++++++++++++++++
+ lib/scheduler/kaiair/pktr_runtime_config.h    |  45 ++++++++
+ lib/scheduler/support/sch_pdu_builder.cpp     |  15 +++
+ lib/scheduler/ue_context/ue_cell.cpp          |  15 +++
+ lib/scheduler/ue_context/ue_cell.h            |  10 +-
+ .../ue_scheduling/ue_cell_grid_allocator.cpp  |   7 ++
+ .../unittests/scheduler/kaiair/CMakeLists.txt |   4 +
+ .../kaiair/pktr_dl_power_controller_test.cpp  | 102 ++++++++++++++++++
+ .../kaiair/pktr_runtime_config_test.cpp       |  59 ++++++++++
+ 9 files changed, 346 insertions(+), 1 deletion(-)
+ create mode 100644 lib/scheduler/kaiair/pktr_dl_power_controller.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_dl_power_controller_test.cpp
+
+diff --git a/lib/scheduler/kaiair/pktr_dl_power_controller.h b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+new file mode 100644
+index 0000000000..2706faa5a2
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+@@ -0,0 +1,90 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, Tier-A IPC-DL closed-loop power controller (one per UE-per-cell link).
++//
++// On DL the gNB is not the receiver, so it cannot measure per-packet SINR. Instead it drives the
++// per-PDSCH transmit-power offset from the per-packet HARQ-ACK stream, holding the empirical BLER at
++// the PktR target (1 - beta), per-packet reliability P(success) >= beta. The actuator is the
++// pwr_ctrl_offset field (validated on hardware to move real TX power; see dl-power-actuator-confirmed).
++//
++// Authority is one-sided on this platform: boosting clips (the lower-PHY amplitude controller keeps
++// ~12 dB PAPR headroom and PDSCH already sits near the ceiling). So the offset is a SHED-from-ceiling
++// value clamped to [0, 15] dB (0 = max power = ceiling, 15 = -15 dB). The loop adds power by moving
++// toward 0 and sheds by moving toward 15; it never goes negative, so it never clips.
++//
++// Control law (per HARQ-ACK, OLLA-style asymmetric step, converges to BLER = target = 1 - beta):
++//   ack  -> offset += eta * target           (success: shed a little, save power)
++//   nack -> offset -= eta * (1 - target)      (failure: add power)
++// At equilibrium E[delta] = (1-bler)*eta*target - bler*eta*(1-target) = 0  =>  bler = target.
++// The integrator self-smooths, so no separate BLER filter is needed for control (one is kept only
++// for display/debug). This is the measurement-based half of the IPC law; the CQI-based feedforward
++// (set-point) is layered on in a later increment.
++
++#pragma once
++
++#include "pktr_runtime_config.h"
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <optional>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Tier-A IPC-DL closed-loop power controller. Drives a UE's per-PDSCH DL power offset from its
++/// HARQ-ACK stream to hold the empirical BLER at the PktR target (1 - beta).
++class pktr_dl_power_controller
++{
++public:
++  /// Display-only BLER EWMA memory (not used by the control law, which self-smooths).
++  static constexpr float bler_ewma_c = 0.95F;
++
++  explicit pktr_dl_power_controller(const pktr_settings& s = pktr_runtime()) :
++    enabled_(s.dl_loop),
++    target_(std::clamp(1.0F - s.ipc.beta, 0.0F, 1.0F)),
++    eta_(std::max(0.0F, s.dl_eta)),
++    offset_db_(std::clamp(s.dl_nominal_db, 0.0F, 15.0F))
++  {
++  }
++
++  /// Feed one DL HARQ outcome (true = ACK, false = NACK). The caller filters out DTX.
++  void update(bool ack)
++  {
++    ++nof_acks_;
++    bler_ewma_ = bler_ewma_c * bler_ewma_ + (1.0F - bler_ewma_c) * (ack ? 0.0F : 1.0F);
++    if (not enabled_) {
++      return;
++    }
++    // OLLA-style asymmetric step toward BLER = target. ack -> shed (offset up); nack -> add power (down).
++    offset_db_ += ack ? (eta_ * target_) : -(eta_ * (1.0F - target_));
++    offset_db_ = std::clamp(offset_db_, 0.0F, 15.0F);
++  }
++
++  /// Per-grant DL power offset to write into pwr_ctrl_offset, or nullopt when the loop is disabled
++  /// (in which case the stock / static path applies). Quantized to the int8 1-dB field.
++  std::optional<int8_t> pwr_ctrl_offset() const
++  {
++    if (not enabled_) {
++      return std::nullopt;
++    }
++    return static_cast<int8_t>(std::lround(offset_db_));
++  }
++
++  bool     enabled() const { return enabled_; }
++  float    offset_db() const { return offset_db_; }
++  float    target() const { return target_; }
++  float    bler() const { return bler_ewma_; }
++  uint64_t nof_acks() const { return nof_acks_; }
++
++private:
++  bool     enabled_;
++  float    target_;            // 1 - beta
++  float    eta_;               // base step size (dB)
++  float    offset_db_;         // integrator state, shed-from-ceiling, [0,15]
++  float    bler_ewma_ = 0.0F;  // display/debug only
++  uint64_t nof_acks_  = 0;
++};
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index e99751f533..d93376b6af 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -20,7 +20,10 @@
+ 
+ #include "pktr_ipc.h"
+ #include <algorithm>
++#include <cmath>
++#include <cstdint>
+ #include <cstdlib>
++#include <optional>
+ #include <string_view>
+ 
+ namespace ocudu {
+@@ -41,6 +44,22 @@ struct pktr_settings {
+   /// EWMA sigma (dB) above which the view treats the interval as a regime transition and suppresses
+   /// the (invalid, mean-lag-dominated) Cantelli cushion.
+   float sigma_transient_db = 6.0F;
++  /// Whether PktR actuates DL power (Tier-A): overrides the per-PDSCH power offset INDEPENDENTLY of
++  /// the CSI-RS RRC value, so the UE's CQI assumption is unchanged (no confound). A/B-able separately
++  /// from the UL \c actuate gate.
++  bool dl_actuate = false;
++  /// Static DL per-PDSCH power offset (dB) applied to every C-RNTI PDSCH while \c dl_actuate is on.
++  /// Increment-1 open-loop test value; the closed loop (Increment 2) replaces it with a per-UE value
++  /// from the DL BLER loop. Sign follows pwr_ctrl_offset: HIGHER = LOWER PDSCH power (10^(-offset/20)).
++  float dl_pwr_offset_db = 0.0F;
++  /// Whether the Tier-A IPC-DL CLOSED LOOP is active: each UE's per-PDSCH power offset is driven by
++  /// its HARQ-ACK BLER toward the PktR target (1 - beta). When on, supersedes \c dl_pwr_offset_db.
++  bool dl_loop = false;
++  /// IPC-DL loop step size (dB per HARQ-ACK, OLLA-style asymmetric step). Larger = faster, more jitter.
++  float dl_eta = 0.1F;
++  /// IPC-DL loop initial / backed-off nominal offset (dB), clamped to [0,15]. The loop modulates DOWN
++  /// from the ceiling (offset 0 = max power) and NEVER goes negative, so it never clips (Check B).
++  float dl_nominal_db = 0.0F;
+ };
+ 
+ namespace detail {
+@@ -76,6 +95,11 @@ inline pktr_settings load_pktr_settings()
+   s.ipc.beta           = std::clamp(env_float("KAIAIR_PKTR_BETA", s.ipc.beta), 0.0F, 0.999999F);
+   s.ipc.ewma_c         = std::clamp(env_float("KAIAIR_PKTR_EWMA_C", s.ipc.ewma_c), 0.0F, 0.999999F);
+   s.sigma_transient_db = std::max(0.0F, env_float("KAIAIR_PKTR_SIGMA_TRANSIENT_DB", s.sigma_transient_db));
++  s.dl_actuate         = env_flag("KAIAIR_PKTR_DL_ACTUATE");
++  s.dl_pwr_offset_db   = std::clamp(env_float("KAIAIR_PKTR_DL_PWR_OFFSET", 0.0F), -8.0F, 15.0F);
++  s.dl_loop            = env_flag("KAIAIR_PKTR_DL_LOOP");
++  s.dl_eta             = std::max(0.0F, env_float("KAIAIR_PKTR_DL_ETA", s.dl_eta));
++  s.dl_nominal_db      = std::clamp(env_float("KAIAIR_PKTR_DL_NOMINAL_DB", s.dl_nominal_db), 0.0F, 15.0F);
+   return s;
+ }
+ 
+@@ -110,5 +134,26 @@ inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls)
+   return pktr_ul_sinr_offset_db(ls, pktr_runtime());
+ }
+ 
++/// Per-grant DL power offset (as a \c pwr_ctrl_offset value) for Tier-A DL actuation. Returns the
++/// value to write into \c pdsch.tx_pwr_info.pwr_ctrl_offset for C-RNTI data PDSCH, or \c nullopt to
++/// keep the stock (CSI-derived) value. This is the single home of the IPC-DL actuation policy
++/// (mirrors the UL \c pktr_ul_sinr_offset_db). Increment 1 returns the static env offset; Increment 2
++/// will take a per-UE argument from the DL \c pktr_link_state / HARQ-ACK BLER loop. Quantized to the
++/// int8 1-dB field and clamped to the 3GPP {-8..15} range (HIGHER = LOWER PDSCH power).
++inline std::optional<int8_t> pktr_dl_pwr_ctrl_offset(const pktr_settings& s)
++{
++  // The closed loop, when active, drives the per-UE offset in the allocator instead of this static one.
++  if (not s.dl_actuate or s.dl_loop) {
++    return std::nullopt;
++  }
++  return static_cast<int8_t>(std::lround(std::clamp(s.dl_pwr_offset_db, -8.0F, 15.0F)));
++}
++
++/// Convenience overload using the process-wide settings.
++inline std::optional<int8_t> pktr_dl_pwr_ctrl_offset()
++{
++  return pktr_dl_pwr_ctrl_offset(pktr_runtime());
++}
++
+ } // namespace kaiair
+ } // namespace ocudu
+diff --git a/lib/scheduler/support/sch_pdu_builder.cpp b/lib/scheduler/support/sch_pdu_builder.cpp
+index 9fa693a202..e928a017b5 100644
+--- a/lib/scheduler/support/sch_pdu_builder.cpp
++++ b/lib/scheduler/support/sch_pdu_builder.cpp
+@@ -10,6 +10,7 @@
+ #include "ocudu/ran/csi_report/csi_report_on_pusch_helpers.h"
+ #include "ocudu/ran/csi_report/csi_report_size.h"
+ #include "ocudu/scheduler/config/serving_cell_config.h"
++#include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR: Tier-A DL power actuation knob
+ 
+ using namespace ocudu;
+ 
+@@ -410,6 +411,13 @@ void ocudu::build_pdsch_f1_0_c_rnti(pdsch_information&                  pdsch,
+     }
+   }
+ 
++  // KaiAir/PktR: Tier-A DL power actuation. Override the per-PDSCH power offset INDEPENDENTLY of the
++  // CSI-RS RRC value above, so the UE's CQI assumption is unchanged (no confound). No-op (stock) when
++  // KAIAIR_PKTR_DL_ACTUATE is off. Increment 1 = static env offset; Increment 2 = per-UE BLER loop.
++  if (const auto pktr_dl_offset = kaiair::pktr_dl_pwr_ctrl_offset()) {
++    pdsch.tx_pwr_info.pwr_ctrl_offset = *pktr_dl_offset;
++  }
++
+   // One Codeword.
+   pdsch_codeword& cw = pdsch.codewords.emplace_back();
+   cw.new_data        = is_new_data;
+@@ -478,6 +486,13 @@ void ocudu::build_pdsch_f1_1_c_rnti(pdsch_information&              pdsch,
+       pdsch.tx_pwr_info.pwr_ctrl_offset_ss = cell_cfg.nzp_csi_rs_list.front().pwr_ctrl_offset_ss_db.value();
+     }
+   }
++
++  // KaiAir/PktR: Tier-A DL power actuation (see build_pdsch_f1_0_c_rnti). Override the per-PDSCH power
++  // offset INDEPENDENTLY of the CSI-RS RRC value so the UE's CQI assumption is unchanged. No-op when
++  // KAIAIR_PKTR_DL_ACTUATE is off.
++  if (const auto pktr_dl_offset = kaiair::pktr_dl_pwr_ctrl_offset()) {
++    pdsch.tx_pwr_info.pwr_ctrl_offset = *pktr_dl_offset;
++  }
+ }
+ 
+ void ocudu::build_pusch_f0_0_tc_rnti(pusch_information&                   pusch,
+diff --git a/lib/scheduler/ue_context/ue_cell.cpp b/lib/scheduler/ue_context/ue_cell.cpp
+index 0e6840db90..76125cb29e 100644
+--- a/lib/scheduler/ue_context/ue_cell.cpp
++++ b/lib/scheduler/ue_context/ue_cell.cpp
+@@ -9,6 +9,7 @@
+ #include "ue_drx_controller.h"
+ #include "ocudu/ran/sch/tbs_calculator.h"
+ #include "ocudu/scheduler/scheduler_feedback_handler.h"
++#include "fmt/format.h" // KaiAir/PktR: rate-limited DL-loop debug print
+ 
+ using namespace ocudu;
+ 
+@@ -149,6 +150,20 @@ std::optional<dl_harq_process_handle> ue_cell::handle_dl_ack_info(slot_point
+                                                      h_dl->get_grant_params().mcs,
+                                                      h_dl->get_grant_params().mcs_table,
+                                                      h_dl->get_grant_params().olla_mcs);
++
++    // KaiAir/PktR: feed the Tier-A IPC-DL closed loop with this per-packet HARQ outcome (DTX excluded,
++    // same as OLLA). The loop adjusts the per-PDSCH power offset to hold DL BLER at the target (1-beta).
++    pktr_dl_pc_.update(ack_value == mac_harq_ack_report_status::ack);
++    if (kaiair::pktr_runtime().debug_tpc and pktr_dl_pc_.enabled() and (pktr_dl_pc_.nof_acks() % 200 == 0)) {
++      fmt::print("[KaiAir/PktR DL-loop] rnti={:#06x} offset={:.2f} dB (pwr_ctrl_offset={}) bler={:.3f} "
++                 "target={:.3f} acks={}\n",
++                 fmt::underlying(rnti()),
++                 pktr_dl_pc_.offset_db(),
++                 pktr_dl_pc_.pwr_ctrl_offset().value_or(0),
++                 pktr_dl_pc_.bler(),
++                 pktr_dl_pc_.target(),
++                 pktr_dl_pc_.nof_acks());
++    }
+   }
+ 
+   return h_dl;
+diff --git a/lib/scheduler/ue_context/ue_cell.h b/lib/scheduler/ue_context/ue_cell.h
+index 2e14724aeb..0f49f14c7a 100644
+--- a/lib/scheduler/ue_context/ue_cell.h
++++ b/lib/scheduler/ue_context/ue_cell.h
+@@ -6,7 +6,8 @@
+ 
+ #include "../cell/cell_harq_manager.h"
+ #include "../config/ue_configuration.h"
+-#include "../kaiair/pktr_link_state.h"     // KaiAir/PktR per-link interference statistics
++#include "../kaiair/pktr_link_state.h"          // KaiAir/PktR per-link interference statistics
++#include "../kaiair/pktr_dl_power_controller.h" // KaiAir/PktR Tier-A IPC-DL closed-loop controller
+ #include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR runtime knobs (EWMA c)
+ #include "../support/pucch_power_controller.h"
+ #include "../support/pusch_power_controller.h"
+@@ -180,6 +181,10 @@ public:
+   kaiair::pktr_link_state&       get_pktr_link_state() { return pktr_link_state_; }
+   const kaiair::pktr_link_state& get_pktr_link_state() const { return pktr_link_state_; }
+ 
++  /// \brief KaiAir/PktR Tier-A IPC-DL closed-loop power controller (fed from per-packet HARQ-ACK).
++  kaiair::pktr_dl_power_controller&       get_pktr_dl_power_controller() { return pktr_dl_pc_; }
++  const kaiair::pktr_dl_power_controller& get_pktr_dl_power_controller() const { return pktr_dl_pc_; }
++
+   /// \brief Returns an estimated DL rate in bytes per slot based on the given input parameters.
+   double get_estimated_dl_rate(const pdsch_config_params& pdsch_cfg, sch_mcs_index mcs, unsigned nof_prbs) const;
+   /// \brief Returns an estimated UL rate in bytes per slot based on the given input parameters.
+@@ -208,6 +213,9 @@ private:
+   /// KaiAir/PktR per-link interference statistics, owned by value (one per UE-per-cell link).
+   kaiair::pktr_link_state pktr_link_state_{kaiair::pktr_runtime().ipc.ewma_c};
+ 
++  /// KaiAir/PktR Tier-A IPC-DL closed-loop power controller, owned by value (one per UE-per-cell link).
++  kaiair::pktr_dl_power_controller pktr_dl_pc_{};
++
+   /// \brief Whether cell is currently active.
+   bool active = true;
+ 
+diff --git a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+index 87a5204d06..db494f5572 100644
+--- a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
++++ b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+@@ -439,6 +439,13 @@ void ue_cell_grid_allocator::set_pdsch_params(dl_grant_info&
+       report_fatal_error("Unsupported PDCCH DL DCI format");
+   }
+ 
++  // KaiAir/PktR: Tier-A IPC-DL closed loop. Override the per-PDSCH power offset with this UE's
++  // controller output (shed-from-ceiling, [0,15], no clip), decoupled from the CSI-RS RRC value so
++  // the UE's CQI assumption is unchanged. No-op (stock) when the DL loop is disabled.
++  if (const auto pktr_dl_off = ue_cc.get_pktr_dl_power_controller().pwr_ctrl_offset()) {
++    msg.pdsch_cfg.tx_pwr_info.pwr_ctrl_offset = *pktr_dl_off;
++  }
++
+   // Save set PDCCH and PDSCH PDU parameters in HARQ process.
+   dl_harq_alloc_context pdsch_sched_ctx;
+   pdsch_sched_ctx.dci_cfg_type = grant.pdcch->dci.type;
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index bf822edb75..d902fc8db3 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -12,3 +12,7 @@ add_test(pktr_ipc_test pktr_ipc_test)
+ add_executable(pktr_runtime_config_test pktr_runtime_config_test.cpp)
+ target_link_libraries(pktr_runtime_config_test ocudulog gtest gtest_main)
+ add_test(pktr_runtime_config_test pktr_runtime_config_test)
++
++add_executable(pktr_dl_power_controller_test pktr_dl_power_controller_test.cpp)
++target_link_libraries(pktr_dl_power_controller_test ocudulog gtest gtest_main)
++add_test(pktr_dl_power_controller_test pktr_dl_power_controller_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_dl_power_controller_test.cpp b/tests/unittests/scheduler/kaiair/pktr_dl_power_controller_test.cpp
+new file mode 100644
+index 0000000000..b5ad988cfd
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_dl_power_controller_test.cpp
+@@ -0,0 +1,102 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_dl_power_controller.h"
++#include <cmath>
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++namespace {
++
++pktr_settings loop_settings(float beta = 0.9F, float eta = 0.1F, float nominal = 7.0F)
++{
++  pktr_settings s;
++  s.dl_loop       = true;
++  s.ipc.beta      = beta;
++  s.dl_eta        = eta;
++  s.dl_nominal_db = nominal;
++  return s;
++}
++
++} // namespace
++
++// Disabled loop: no offset override, and updates never produce an actuation value.
++TEST(pktr_dl_power_controller_test, disabled_returns_nullopt)
++{
++  pktr_settings s = loop_settings();
++  s.dl_loop       = false;
++  pktr_dl_power_controller c(s);
++  EXPECT_FALSE(c.enabled());
++  EXPECT_FALSE(c.pwr_ctrl_offset().has_value());
++  for (int i = 0; i < 100; ++i) {
++    c.update(false); // even all-NACK
++  }
++  EXPECT_FALSE(c.pwr_ctrl_offset().has_value());
++}
++
++// The reliability target is 1 - beta.
++TEST(pktr_dl_power_controller_test, target_is_one_minus_beta)
++{
++  EXPECT_NEAR(pktr_dl_power_controller(loop_settings(0.9F)).target(), 0.1F, 1e-6F);
++  EXPECT_NEAR(pktr_dl_power_controller(loop_settings(0.99F)).target(), 0.01F, 1e-6F);
++}
++
++// Starts at the (backed-off) nominal offset, quantized to the 1-dB field.
++TEST(pktr_dl_power_controller_test, starts_at_nominal)
++{
++  pktr_dl_power_controller c(loop_settings(0.9F, 0.1F, 7.0F));
++  EXPECT_NEAR(c.offset_db(), 7.0F, 1e-6F);
++  ASSERT_TRUE(c.pwr_ctrl_offset().has_value());
++  EXPECT_EQ(*c.pwr_ctrl_offset(), static_cast<int8_t>(7));
++}
++
++// All ACKs => sheds power (offset rises) and saturates at the 15 dB floor, never beyond.
++TEST(pktr_dl_power_controller_test, all_acks_shed_to_max_offset)
++{
++  pktr_dl_power_controller c(loop_settings(0.9F, 0.5F, 7.0F));
++  for (int i = 0; i < 10000; ++i) {
++    c.update(true);
++  }
++  EXPECT_NEAR(c.offset_db(), 15.0F, 1e-3F);
++  EXPECT_EQ(*c.pwr_ctrl_offset(), static_cast<int8_t>(15));
++}
++
++// All NACKs => adds power (offset falls) and saturates at 0 (ceiling), NEVER negative (no clipping).
++TEST(pktr_dl_power_controller_test, all_nacks_add_to_ceiling_never_negative)
++{
++  pktr_dl_power_controller c(loop_settings(0.9F, 0.5F, 7.0F));
++  for (int i = 0; i < 10000; ++i) {
++    c.update(false);
++  }
++  EXPECT_GE(c.offset_db(), 0.0F);
++  EXPECT_NEAR(c.offset_db(), 0.0F, 1e-3F);
++  EXPECT_EQ(*c.pwr_ctrl_offset(), static_cast<int8_t>(0));
++}
++
++// Asymmetric step: a single NACK moves the offset more than a single ACK (for beta > 0.5).
++TEST(pktr_dl_power_controller_test, nack_step_larger_than_ack_step)
++{
++  pktr_dl_power_controller ca(loop_settings(0.9F, 0.1F, 7.0F));
++  ca.update(true);
++  const float ack_delta = std::fabs(ca.offset_db() - 7.0F);
++
++  pktr_dl_power_controller cn(loop_settings(0.9F, 0.1F, 7.0F));
++  cn.update(false);
++  const float nack_delta = std::fabs(cn.offset_db() - 7.0F);
++
++  EXPECT_GT(nack_delta, ack_delta);
++}
++
++// Convergence: a stream at exactly the target BLER keeps the offset near its start (zero net drift).
++TEST(pktr_dl_power_controller_test, stays_near_equilibrium_at_target_bler)
++{
++  pktr_dl_power_controller c(loop_settings(0.9F, 0.05F, 7.0F)); // target = 0.10
++  // Deterministic 9 ACK : 1 NACK pattern == 10% BLER == target.
++  for (int i = 0; i < 5000; ++i) {
++    c.update((i % 10) != 0); // NACK on every 10th update
++  }
++  EXPECT_GT(c.offset_db(), 5.0F);
++  EXPECT_LT(c.offset_db(), 9.0F);
++}
+diff --git a/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp b/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+index f1e77bdc26..e8a5920696 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+@@ -19,6 +19,8 @@ void clear_env()
+   ::unsetenv("KAIAIR_PKTR_BETA");
+   ::unsetenv("KAIAIR_PKTR_EWMA_C");
+   ::unsetenv("KAIAIR_PKTR_SIGMA_TRANSIENT_DB");
++  ::unsetenv("KAIAIR_PKTR_DL_ACTUATE");
++  ::unsetenv("KAIAIR_PKTR_DL_PWR_OFFSET");
+ }
+ 
+ } // namespace
+@@ -150,3 +152,60 @@ TEST(pktr_runtime_config_test, offset_suppressed_on_sigma_spike)
+   ASSERT_GT(ls.std_ni_db(), 6.0F);
+   EXPECT_FLOAT_EQ(pktr_ul_sinr_offset_db(ls, actuating_settings(0.9F, 6.0F)), 0.0F);
+ }
++
++// --- Tier-A DL power actuation (Increment 1: open-loop per-PDSCH offset) ---
++
++// DL actuation off => no override (the stock CSI-derived pwr_ctrl_offset is kept).
++TEST(pktr_runtime_config_test, dl_offset_nullopt_when_actuation_disabled)
++{
++  pktr_settings s;
++  s.dl_actuate       = false;
++  s.dl_pwr_offset_db = 12.0F; // ignored while off
++  EXPECT_FALSE(pktr_dl_pwr_ctrl_offset(s).has_value());
++}
++
++// DL actuation on => returns the offset, quantized to the int8 1-dB pwr_ctrl_offset field.
++TEST(pktr_runtime_config_test, dl_offset_returns_quantized_value_when_enabled)
++{
++  pktr_settings s;
++  s.dl_actuate       = true;
++  s.dl_pwr_offset_db = 15.0F;
++  const auto off     = pktr_dl_pwr_ctrl_offset(s);
++  ASSERT_TRUE(off.has_value());
++  EXPECT_EQ(*off, static_cast<int8_t>(15));
++  s.dl_pwr_offset_db = 5.6F; // fractional dB rounds to nearest 1-dB step
++  EXPECT_EQ(*pktr_dl_pwr_ctrl_offset(s), static_cast<int8_t>(6));
++}
++
++// The returned offset is clamped to the 3GPP {-8..15} field range.
++TEST(pktr_runtime_config_test, dl_offset_clamped_to_field_range)
++{
++  pktr_settings s;
++  s.dl_actuate       = true;
++  s.dl_pwr_offset_db = 100.0F;
++  EXPECT_EQ(*pktr_dl_pwr_ctrl_offset(s), static_cast<int8_t>(15));
++  s.dl_pwr_offset_db = -100.0F;
++  EXPECT_EQ(*pktr_dl_pwr_ctrl_offset(s), static_cast<int8_t>(-8));
++}
++
++// Env loads the DL knobs; the static offset is clamped at load time.
++TEST(pktr_runtime_config_test, dl_env_loads_and_clamps)
++{
++  clear_env();
++  ::setenv("KAIAIR_PKTR_DL_ACTUATE", "1", 1);
++  ::setenv("KAIAIR_PKTR_DL_PWR_OFFSET", "12", 1);
++  const pktr_settings s = detail::load_pktr_settings();
++  EXPECT_TRUE(s.dl_actuate);
++  EXPECT_FLOAT_EQ(s.dl_pwr_offset_db, 12.0F);
++  ::setenv("KAIAIR_PKTR_DL_PWR_OFFSET", "40", 1); // out of range -> clamped
++  EXPECT_FLOAT_EQ(detail::load_pktr_settings().dl_pwr_offset_db, 15.0F);
++  clear_env();
++}
++
++// DL actuation is off by default (unset env).
++TEST(pktr_runtime_config_test, dl_actuate_off_by_default)
++{
++  clear_env();
++  EXPECT_FALSE(detail::load_pktr_settings().dl_actuate);
++  clear_env();
++}

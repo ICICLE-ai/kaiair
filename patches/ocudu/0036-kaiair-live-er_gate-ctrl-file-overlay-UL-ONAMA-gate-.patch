@@ -1,0 +1,106 @@
+From 81956dfdc500f7277ebb8dd720e06f640186150e Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Thu, 20 Aug 2026 19:01:08 -0500
+Subject: [PATCH 36/52] kaiair: live er_gate ctrl-file overlay, UL ONAMA gate
+ in can_allocate_pusch
+
+---
+ lib/scheduler/kaiair/pktr_er_controller.h     | 11 +++++++
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 29 +++++++++++++++++++
+ .../ue_scheduling/intra_slice_scheduler.cpp   |  7 ++++-
+ 3 files changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_er_controller.h b/lib/scheduler/kaiair/pktr_er_controller.h
+index 37ee0b1614..32262f1715 100644
+--- a/lib/scheduler/kaiair/pktr_er_controller.h
++++ b/lib/scheduler/kaiair/pktr_er_controller.h
+@@ -78,6 +78,17 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+   const double now = wall_now_s();
+ 
+   out.mode = parse_gate_mode(std::getenv("KAIAIR_PKTR_ER_GATE"));
++  {
++    // Live ctrl-file override (GUI selector) wins over the launch-time env when present.
++    const int live = pktr_er_gate_override_now();
++    if (live == 0) {
++      out.mode = er_gate_mode::off;
++    } else if (live == 1) {
++      out.mode = er_gate_mode::observe;
++    } else if (live == 2) {
++      out.mode = er_gate_mode::enforce;
++    }
++  }
+ 
+   pktr_conflict_graph graph;
+   const float         gamma_dl = pktr_dl_gamma_now(s.dl_gamma_db);
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index faadb89472..9411eca1b6 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -199,6 +199,10 @@ struct live_controls_t {
+   // KaiAir LDP: live deadline (ldp_deadline_ms in the ctrl file; 0 = LDP off). NaN until the key
+   // appears, the GUI LDP toggle then works WITHOUT any agent/gNB restart.
+   std::atomic<float>     ldp_deadline_ms{NAN};
++  // KaiAir/PktR multi-cell: live ER-gate mode from the ctrl file ("er_gate": "off"|"observe"|"enforce"),
++  // -1 until the key appears (env KAIAIR_PKTR_ER_GATE then applies). Lets the multi-cell test flip
++  // observe -> enforce WITHOUT restarting the gNB (the A/B the guide's step 4 needs).
++  std::atomic<int>       er_gate{-1};
+   std::atomic<long long> last_ms{0};      // last refresh (steady ms)
+ };
+ 
+@@ -286,6 +290,22 @@ inline void refresh_live_controls()
+   L.dl_gamma_db.store(json_float(s, "dl_sinr_target_db", NAN), std::memory_order_relaxed);
+   // KaiAir LDP: live deadline toggle (0 = off); NaN fallback keeps the env deadline.
+   L.ldp_deadline_ms.store(json_float(s, "ldp_deadline_ms", NAN), std::memory_order_relaxed);
++  // KaiAir/PktR multi-cell: string-valued key; look at the text right after "er_gate":.
++  {
++    int              mode = -1;
++    const size_t     k    = s.find("\"er_gate\"");
++    if (k != std::string::npos) {
++      const std::string tail = s.substr(k + 9, 16);
++      if (tail.find("enforce") != std::string::npos) {
++        mode = 2;
++      } else if (tail.find("observe") != std::string::npos) {
++        mode = 1;
++      } else if (tail.find("off") != std::string::npos) {
++        mode = 0;
++      }
++    }
++    L.er_gate.store(mode, std::memory_order_relaxed);
++  }
+   L.active.store(true, std::memory_order_relaxed);
+ }
+ 
+@@ -326,6 +346,15 @@ inline ldp_config pktr_ldp_now()
+   return cfg;
+ }
+ 
++/// KaiAir/PktR multi-cell: live ER-gate mode override, 0 off / 1 observe / 2 enforce from the ctrl
++/// file, or -1 when the overlay is inactive or carries no er_gate key (caller falls back to env).
++inline int pktr_er_gate_override_now()
++{
++  detail::refresh_live_controls();
++  detail::live_controls_t& L = detail::live_controls();
++  return L.active.load(std::memory_order_relaxed) ? L.er_gate.load(std::memory_order_relaxed) : -1;
++}
++
+ /// KaiAir/PktR DL-SINR: effective DL SINR-target margin gamma_DL (dB), the live GUI value when the overlay
+ /// carries a dl_sinr_target_db key, else the env value (KAIAIR_PKTR_DL_GAMMA_DB).
+ inline float pktr_dl_gamma_now(float env_fallback)
+diff --git a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+index 4a5ba257b9..739caaa336 100644
+--- a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
++++ b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+@@ -804,7 +804,12 @@ bool intra_slice_scheduler::can_allocate_pdsch(const slice_ue& u, const ue_cell&
+ bool intra_slice_scheduler::can_allocate_pusch(const slice_ue& u, const ue_cell& ue_cc) const
+ {
+   // Check if PDCCH/PUSCH are possible for the provided slots (e.g. not in UL slot or measGap)
+-  return ue_cc.is_pusch_enabled(pdcch_slot, pusch_slot);
++  if (not ue_cc.is_pusch_enabled(pdcch_slot, pusch_slot)) {
++    return false;
++  }
++  // KaiAir/PktR: ONAMA exclusion-region gate, UL direction (mask lookup only; fail-open when this
++  // UL link has no entry, i.e. until UL-victim attribution feeds the conflict graph).
++  return kaiair::gate_table().allowed(static_cast<uint16_t>(u.crnti()), kaiair::link_dir::ul, pusch_slot.count());
+ }
+ std::optional<ue_newtx_candidate> intra_slice_scheduler::create_newtx_dl_candidate(const slice_ue& u) const
+ {

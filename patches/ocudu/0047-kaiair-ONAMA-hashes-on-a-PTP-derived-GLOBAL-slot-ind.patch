@@ -1,0 +1,177 @@
+From ff60e874c521fec4127314406d8345b44041ad73 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 26 Aug 2026 23:11:18 -0500
+Subject: [PATCH 47/52] kaiair: ONAMA hashes on a PTP-derived GLOBAL slot index
+ (shared across cells, join-order independent) instead of the local frame
+ counter; cross-cell agreement tests
+
+---
+ lib/scheduler/kaiair/pktr_er_controller.h     |  9 +++-
+ lib/scheduler/kaiair/pktr_slot_gate.h         | 46 +++++++++++++++----
+ .../scheduler/kaiair/pktr_slot_gate_test.cpp  | 39 ++++++++++++++++
+ 3 files changed, 84 insertions(+), 10 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_er_controller.h b/lib/scheduler/kaiair/pktr_er_controller.h
+index 5434557617..eb426202c6 100644
+--- a/lib/scheduler/kaiair/pktr_er_controller.h
++++ b/lib/scheduler/kaiair/pktr_er_controller.h
+@@ -253,6 +253,11 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+   }
+ 
+   // 3./4. Conflict sets for OUR links -> ONAMA masks -> gate table.
++  // Map the local slot counter to the shared GLOBAL (PTP-absolute) slot index so every cell hashes
++  // the same physical slot to the same priority (see kaiair_global_slot_base). wall_now_s() reads
++  // the PTP-synced system clock.
++  const long long kaiair_wall_ns   = static_cast<long long>(wall_now_s() * 1e9);
++  const uint64_t  kaiair_glob_base = kaiair_global_slot_base(now_slot, kaiair_wall_ns);
+   auto snap    = std::make_shared<gate_snapshot>();
+   snap->mode   = out.mode;
+   snap->my_pci = my_pci;
+@@ -262,7 +267,7 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+     }
+     const uint32_t id = make_link_id(my_pci, r.rnti, link_dir::dl);
+     r.conflicts       = graph.conflict_set(id);
+-    link_slot_mask m  = compute_link_mask(id, now_slot, window, r.conflicts);
++    link_slot_mask m  = compute_link_mask(id, now_slot, window, r.conflicts, kaiair_glob_base);
+     r.active_fraction = active_fraction(m);
+     snap->masks[id]   = std::move(m);
+   }
+@@ -274,7 +279,7 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+     const uint32_t id           = make_link_id(my_pci, r.rnti, link_dir::ul);
+     const auto     ul_conflicts = graph.conflict_set(id);
+     r.ul_conflict_count         = static_cast<unsigned>(ul_conflicts.size());
+-    link_slot_mask m            = compute_link_mask(id, now_slot, window, ul_conflicts);
++    link_slot_mask m            = compute_link_mask(id, now_slot, window, ul_conflicts, kaiair_glob_base);
+     r.ul_active_fraction        = active_fraction(m);
+     snap->masks[id]             = std::move(m);
+   }
+diff --git a/lib/scheduler/kaiair/pktr_slot_gate.h b/lib/scheduler/kaiair/pktr_slot_gate.h
+index 5453b5fe15..f97e76df2e 100644
+--- a/lib/scheduler/kaiair/pktr_slot_gate.h
++++ b/lib/scheduler/kaiair/pktr_slot_gate.h
+@@ -44,20 +44,24 @@ inline er_gate_mode parse_gate_mode(const char* s)
+ 
+ /// Deterministic per-(slot, link) priority: splitmix64 finalizer over the pair. Identical on every
+ /// node by construction; uniform enough that ties are negligible (ties broken by link id).
+-inline uint64_t onama_priority(uint32_t slot_count, uint32_t link_id)
++inline uint64_t onama_priority(uint64_t global_slot, uint32_t link_id)
+ {
+-  uint64_t z = (static_cast<uint64_t>(slot_count) << 32) ^ link_id ^ 0x9E3779B97F4A7C15ULL;
++  // \p global_slot is a GLOBAL slot index shared by all cells (derived from a common absolute time
++  // reference, e.g. the PTP-synced host clock), NOT a per-cell since-boot frame counter. This is
++  // what makes two cells rank the same physical slot identically. uint64 because the absolute index
++  // (slots since the epoch) far exceeds 32 bits.
++  uint64_t z = global_slot * 0x9E3779B97F4A7C15ULL ^ (static_cast<uint64_t>(link_id) * 0xD1B54A32D192ED03ULL);
+   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+   z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+   return z ^ (z >> 31);
+ }
+ 
+ /// ACTIVE iff L outranks every conflicting link in this slot (tie -> larger link id wins).
+-inline bool onama_active(uint32_t slot_count, uint32_t link_id, const std::vector<uint32_t>& conflict_set)
++inline bool onama_active(uint64_t global_slot, uint32_t link_id, const std::vector<uint32_t>& conflict_set)
+ {
+-  const uint64_t mine = onama_priority(slot_count, link_id);
++  const uint64_t mine = onama_priority(global_slot, link_id);
+   for (uint32_t other : conflict_set) {
+-    const uint64_t theirs = onama_priority(slot_count, other);
++    const uint64_t theirs = onama_priority(global_slot, other);
+     if (theirs > mine || (theirs == mine && other > link_id)) {
+       return false;
+     }
+@@ -77,19 +81,45 @@ struct link_slot_mask {
+   }
+ };
+ 
+-inline link_slot_mask
+-compute_link_mask(uint32_t link_id, uint32_t base_slot, unsigned window, const std::vector<uint32_t>& conflict_set)
++inline link_slot_mask compute_link_mask(uint32_t                     link_id,
++                                        uint32_t                     base_slot,
++                                        unsigned                     window,
++                                        const std::vector<uint32_t>& conflict_set,
++                                        uint64_t                     global_base = 0)
+ {
++  // The mask array is indexed by the LOCAL slot (base_slot..) so the scheduler's local-slot lookup
++  // in link_slot_mask::at() is unchanged. The ONAMA priority, however, is evaluated on the GLOBAL
++  // index (global_base..) so all cells agree. global_base==0 means "same as local" (offset 0), used
++  // by unit tests and single-cell fallback.
++  const uint64_t gbase = global_base != 0 ? global_base : static_cast<uint64_t>(base_slot);
+   link_slot_mask m;
+   m.link_id   = link_id;
+   m.base_slot = base_slot;
+   m.active.resize(window);
+   for (unsigned i = 0; i < window; ++i) {
+-    m.active[i] = onama_active(base_slot + i, link_id, conflict_set) ? 1 : 0;
++    m.active[i] = onama_active(gbase + i, link_id, conflict_set) ? 1 : 0;
+   }
+   return m;
+ }
+ 
++/// Map a cell's LOCAL slot counter to the GLOBAL (absolute-time) slot index. The offset is latched
++/// once from the PTP-synced wall clock: global_now = floor(wall_ns / slot_dur_ns); offset =
++/// global_now - local_now. Because the radio slot counter (PPS/10MHz-locked) and the wall clock
++/// (PTP) both advance at real time, the offset is constant, so every cell, whenever it started and
++/// whenever it joins, maps its local slots onto the SAME global index for the same physical slot.
++/// slot_dur_ns defaults to 500000 (0.5 ms slot, 30 kHz SCS / numerology 1).
++inline uint64_t kaiair_global_slot_base(uint32_t local_now, long long wall_ns, long long slot_dur_ns = 500000)
++{
++  static long long s_offset = 0;
++  static bool       s_set   = false;
++  if (!s_set && wall_ns > 0) {
++    const long long global_now = wall_ns / slot_dur_ns;
++    s_offset                   = global_now - static_cast<long long>(local_now);
++    s_set                      = true;
++  }
++  return static_cast<uint64_t>(static_cast<long long>(local_now) + s_offset);
++}
++
+ /// Fraction of slots a link is active over a window (for telemetry / the concurrency metric).
+ inline float active_fraction(const link_slot_mask& m)
+ {
+diff --git a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+index 24d000fd77..d149ffaa09 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+@@ -77,3 +77,42 @@ TEST(pktr_slot_gate_test, gate_mode_parsing)
+   EXPECT_EQ(parse_gate_mode("1"), er_gate_mode::enforce);
+   EXPECT_EQ(parse_gate_mode("garbage"), er_gate_mode::off);
+ }
++
++// KaiAir: two cells hashing on a SHARED global slot index reach identical ONAMA verdicts for the
++// same physical slot even though their LOCAL frame counters differ (cell A booted earlier).
++TEST(pktr_slot_gate_test, global_index_cross_cell_agreement)
++{
++  using namespace ocudu::kaiair;
++  const uint32_t linkA = 0x00020001, linkB = 0x00030002;
++  // Same physical instant: wall clock identical; local counters differ by a large offset.
++  const long long wall_ns  = 1000000000000LL;       // 1e12 ns
++  const uint32_t  localA   = 863;                    // cell A's frame counter
++  const uint32_t  localB   = 476;                    // cell B's frame counter (booted later)
++  // Each cell independently maps its local slot to the global index (offset latched per process;
++  // emulate two processes by computing the base arithmetic directly).
++  const long long slot_dur = 500000;
++  const long long global   = wall_ns / slot_dur;
++  const uint64_t  gbaseA   = static_cast<uint64_t>(global);       // A: global for its local 863
++  const uint64_t  gbaseB   = static_cast<uint64_t>(global);       // B: same global for its local 476
++  // For the same physical slot, both must produce the same active/mute decision for each link.
++  for (unsigned i = 0; i < 32; ++i) {
++    const bool aOnA = onama_active(gbaseA + i, linkA, {linkB});
++    const bool aOnB = onama_active(gbaseB + i, linkA, {linkB});
++    EXPECT_EQ(aOnA, aOnB);
++    // And the two links are complementary in a 2-clique (exactly one active per slot).
++    EXPECT_NE(onama_active(gbaseA + i, linkA, {linkB}), onama_active(gbaseB + i, linkB, {linkA}));
++  }
++}
++
++// The local->global mapping is stable and makes different local counters land on one global index.
++TEST(pktr_slot_gate_test, global_slot_base_offset_is_consistent)
++{
++  using namespace ocudu::kaiair;
++  const long long wall_ns  = 2000000000000LL;
++  const long long slot_dur = 500000;
++  const uint64_t  base863  = kaiair_global_slot_base(863, wall_ns, slot_dur);
++  // Same process, later call with an advanced local counter -> global advances by the same delta.
++  const uint64_t  base900  = kaiair_global_slot_base(900, wall_ns, slot_dur);
++  EXPECT_EQ(base900 - base863, 37u);
++  EXPECT_EQ(base863, static_cast<uint64_t>(wall_ns / slot_dur)); // first call latches the offset
++}

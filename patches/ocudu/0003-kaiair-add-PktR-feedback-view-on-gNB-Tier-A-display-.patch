@@ -1,0 +1,184 @@
+From 62291e6448a00089c7b326ee3565c5502768fefd Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 22 Jun 2026 14:40:53 -0500
+Subject: [PATCH 03/52] kaiair: add PktR feedback view on gNB (Tier-A,
+ display-only)
+
+Surface the per-UE feedback the scheduler already collects, annotated with how
+PktR consumes it: UE-reported CQI (-> DL SINR working point) and DL HARQ
+(-> reliability/BLER target beta), and gNB-measured UL PUSCH SINR & RSRP
+(-> receiver interference+noise NI = RSRP - SINR, the Cantelli power input).
+
+New file kaiair_pktr_metrics_view.{h,cpp}; thin env-gated hook
+(KAIAIR_PKTR_METRICS=1) appended to the stdout scheduler-metrics consumer.
+No UE/PHY changes; computes nothing the scheduler acts on yet, first step of
+Phase 1 measurement surfacing for the team demo.
+---
+ .../du_high/metrics/consumers/CMakeLists.txt  |  3 +-
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 85 +++++++++++++++++++
+ .../consumers/kaiair_pktr_metrics_view.h      | 25 ++++++
+ .../consumers/scheduler_metrics_consumers.cpp |  6 ++
+ 4 files changed, 118 insertions(+), 1 deletion(-)
+ create mode 100644 apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+ create mode 100644 apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/CMakeLists.txt b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/CMakeLists.txt
+index 5a82f215ee..d0b04ecb16 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/CMakeLists.txt
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/CMakeLists.txt
+@@ -5,7 +5,8 @@
+ set(SOURCES
+         du_procedure_metrics_consumers.cpp
+         mac_metrics_consumers.cpp
+-        scheduler_metrics_consumers.cpp)
++        scheduler_metrics_consumers.cpp
++        kaiair_pktr_metrics_view.cpp)   # KaiAir/PktR feedback view
+ 
+ add_library(ocudu_du_high_unit_metrics_consumers STATIC ${SOURCES})
+ target_include_directories(ocudu_du_high_unit_metrics_consumers PRIVATE ${CMAKE_SOURCE_DIR})
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+new file mode 100644
+index 0000000000..1e9ee188dc
+--- /dev/null
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -0,0 +1,85 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "kaiair_pktr_metrics_view.h"
++#include "ocudu/ran/rnti.h"
++#include "fmt/format.h"
++#include <cmath>
++#include <cstdlib>
++#include <string_view>
++
++using namespace ocudu;
++
++bool kaiair::pktr_metrics_enabled()
++{
++  // Evaluated once; enable with KAIAIR_PKTR_METRICS=1 in the gNB environment.
++  static const bool enabled = []() {
++    const char* e = std::getenv("KAIAIR_PKTR_METRICS");
++    return e != nullptr && std::string_view(e) == "1";
++  }();
++  return enabled;
++}
++
++namespace {
++
++/// Coarse Tier-A estimate of the DL SINR working point from the UE-reported CQI (CQI table 1).
++/// This is for the feedback view only; the precise CQI<->SINR/MCS/BLER mapping is future work.
++float cqi_to_sinr_db_estimate(float cqi)
++{
++  return 1.9F * cqi - 5.0F;
++}
++
++} // namespace
++
++void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
++{
++  bool printed_header = false;
++
++  for (const scheduler_ue_metrics& ue : cell.ue_metrics) {
++    const bool     has_cqi  = ue.cqi_stats.get_nof_observations() > 0;
++    const bool     has_snr  = std::isfinite(ue.pusch_snr_db) && ue.pusch_snr_db != 0.0F;
++    const bool     has_rsrp = std::isfinite(ue.pusch_rsrp_db);
++    const unsigned dl_tot   = ue.dl_nof_ok + ue.dl_nof_nok;
++
++    // Only report UEs that have produced some feedback this interval.
++    if (!has_cqi && !has_snr && dl_tot == 0) {
++      continue;
++    }
++
++    if (!printed_header) {
++      fmt::print("\n[KaiAir/PktR] per-UE feedback (pci={}), what the UE reports to the gNB, and how PktR uses it:\n",
++                 cell.pci);
++      printed_header = true;
++    }
++
++    fmt::print("  rnti={:#06x}\n", to_value(ue.rnti));
++
++    // ---- UE-reported, downlink ----
++    if (has_cqi) {
++      const float cqi = ue.cqi_stats.get_mean();
++      fmt::print("    UE-reported DL : CQI={:.1f}  ->  est DL SINR ~ {:.1f} dB   (Tier-A working point)\n",
++                 cqi,
++                 cqi_to_sinr_db_estimate(cqi));
++    }
++    if (dl_tot > 0) {
++      fmt::print("    DL reliability : HARQ ok/nok = {}/{}  ->  {:.2f}% delivered (1-BLER)   [PktR target beta]\n",
++                 ue.dl_nof_ok,
++                 ue.dl_nof_nok,
++                 100.0 * static_cast<double>(ue.dl_nof_ok) / static_cast<double>(dl_tot));
++    }
++
++    // ---- gNB-measured, uplink -> receiver interference (the Cantelli input) ----
++    if (has_snr && has_rsrp) {
++      const float ni = ue.pusch_rsrp_db - ue.pusch_snr_db; // RSRP - SINR = interference + noise (dB)
++      fmt::print("    gNB-measured UL: PUSCH SINR={:.1f} dB, RSRP={:.1f} dBFS  ->  interference+noise  NI = RSRP-SINR = "
++                 "{:.1f} dB\n",
++                 ue.pusch_snr_db,
++                 ue.pusch_rsrp_db,
++                 ni);
++      fmt::print("    => PktR        : NI feeds the Cantelli power target  P_T = G + NI + gamma + sigma*sqrt(beta/(1-"
++                 "beta));  NI error drives K-adaptation\n");
++    } else if (has_snr) {
++      fmt::print("    gNB-measured UL: PUSCH SINR={:.1f} dB  (RSRP n/a this interval)\n", ue.pusch_snr_db);
++    }
++  }
++}
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h
+new file mode 100644
+index 0000000000..c85b6dd1c6
+--- /dev/null
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h
+@@ -0,0 +1,25 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, gNB-side view of the per-UE feedback the scheduler already collects, annotated
++// with how PktR consumes each quantity. Tier-A (gNB-only, no UE/PHY changes): it derives the
++// PktR inputs from standard metrics, UE-reported CQI (-> DL SINR working point) and DL HARQ
++// (-> reliability/BLER), and gNB-measured UL PUSCH SINR & RSRP (-> receiver interference+noise
++// NI = RSRP - SINR, the Cantelli power-control input). Display only; computes nothing the
++// scheduler acts on yet.
++
++#pragma once
++
++#include "ocudu/scheduler/scheduler_metrics.h"
++
++namespace ocudu {
++namespace kaiair {
++
++/// Whether the KaiAir PktR feedback view is enabled (env var KAIAIR_PKTR_METRICS=1).
++bool pktr_metrics_enabled();
++
++/// Print, for each UE in the cell, the PktR-relevant feedback and its PktR usage.
++void print_pktr_feedback(const scheduler_cell_metrics& cell);
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp
+index f20b2f0630..a4bde22fb7 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp
+@@ -3,6 +3,7 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "scheduler_metrics_consumers.h"
++#include "kaiair_pktr_metrics_view.h" // KaiAir/PktR feedback view
+ #include "ocudu/support/engineering_notation.h"
+ #include "ocudu/support/format/custom_formattable.h"
+ #include "ocudu/support/format/fmt_to_c_str.h"
+@@ -141,6 +142,11 @@ void scheduler_cell_metrics_consumer_stdout::handle_metric(const std::optional<s
+ 
+       fmt::print("\n");
+     }
++
++    // KaiAir/PktR: append the per-UE PktR feedback view for this cell (env-gated, display only).
++    if (kaiair::pktr_metrics_enabled()) {
++      kaiair::print_pktr_feedback(cell);
++    }
+   }
+ }
+ 

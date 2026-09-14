@@ -1,0 +1,26 @@
+From 3e4b489847aa351991c6284912190e2f787692f1 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 11 Aug 2026 12:38:36 -0500
+Subject: [PATCH 08/12] kaiair: ch.4 measurement C-RNTI-only (SIB1 full-power
+ pollution blinded the DL loop)
+
+---
+ openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+index 34296159ce..7e884bf973 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+@@ -978,7 +978,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
+     // KaiAir ch.4 true-SINR DL feedback: accumulate this symbol's PDSCH-data RSSI (Eq. 4.52) and
+     // unused-RB interference (Eq. 4.54); finalize the slot-level averages (Eq. 4.53/4.55) at the
+     // last PDSCH symbol so the MAC CSI builder always sees a coherent (RSSI, I) pair.
+-    {
++    // C-RNTI ONLY: SIB/paging PDSCH are broadcast at FULL power, while the gNB's per-UE DL power
++    // actuator sheds only the C-RNTI data PDSCH, mixing them in blinds the loop to its own
++    // actuation (bench-observed: RSSI pinned at the SIB1 level regardless of the shed).
++    if (dlsch->rnti_type == TYPE_C_RNTI_) {
+       if (first_symbol_flag)
+         memset(&kaiair_csi_acc, 0, sizeof(kaiair_csi_acc));
+       nr_pdsch_data_rssi(nbRx, rx_size_symbol, rxdataF_ext, nb_re_pdsch);

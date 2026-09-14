@@ -1,0 +1,16 @@
+{
+  "role": "gnb",
+  "port": 5000,
+  "cwd": "/path/to/ocudu/build/apps/gnb",
+  "cmd": ["./gnb", "-c", "gnb.yaml"],
+  "log": "/var/log/kaiair_gnb.log",
+  "control_file": "/tmp/kaiair_ctrl.json",
+  "metrics_file": "/tmp/kaiair_metrics.json",
+  "pty_toggle": true,
+  "toggle_after_s": 12,
+  "pci": 1,
+  "ssb_dbm": 16.0,
+  "er_gate": "observe",
+  "peer_transport": "xn",
+  "dl_sinr_csi": false
+}

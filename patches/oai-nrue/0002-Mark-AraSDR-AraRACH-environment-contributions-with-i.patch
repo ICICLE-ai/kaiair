@@ -1,0 +1,101 @@
+From e6a5589cf8ce7ec3f9dd57ee1cfe014aa828bfb4 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 22 Jun 2026 12:50:23 -0500
+Subject: [PATCH 02/12] Mark AraSDR/AraRACH environment contributions with
+ inline comments
+
+Wrap each AraSDR/AraRACH terrestrial/UE adaptation region with
+'>>> AraSDR/AraRACH contribution (begin/end)' markers for in-tree provenance
+(complementing the faithful-capture commit and the kaiair tracking file).
+Comments only, no functional change.
+---
+ openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c | 4 ++++
+ openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c  | 4 ++++
+ targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf | 6 ++++++
+ 3 files changed, 14 insertions(+)
+
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
+index 72952ea362..9afd64223c 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
+@@ -1382,6 +1382,7 @@ static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
+                     cw_idx)) {
+       if (current_harq->round < sizeofArray(mac->stats.dl.rounds))
+         mac->stats.dl.rounds[current_harq->round]++;
++// >>> AraSDR/AraRACH contribution (begin)
+       // accumulate DL TB stats (MCS/code-rate/modulation), mirroring the UL path
+       const fapi_nr_dl_cw_info_t *cwi = &dlsch_pdu->cw_info[0];
+       if (cwi->qamModOrder > 0) {
+@@ -1393,6 +1394,7 @@ static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
+         mac->stats.dl.rb_size += number_rbs;
+         mac->stats.dl.nr_of_symbols += dlsch_pdu->number_symbols;
+       }
++// <<< AraSDR/AraRACH contribution (end)
+       // set the harq status at MAC for feedback
+       set_harq_status(mac,
+                       dci->pucch_resource_indicator,
+@@ -1470,12 +1472,14 @@ static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
+     max_mimo_layers = *sc_info->maxMIMO_Layers_PDSCH;
+   else
+     max_mimo_layers = mac->uecap_maxMIMO_PDSCH_layers;
++// >>> AraSDR/AraRACH contribution (begin)
+   // PDSCH-ServingCellConfig->maxMIMO-Layers is optional, and the UE capability
+   // (maxNumberMIMO-LayersPDSCH) may not be signalled (e.g. when no UE
+   // capability file is provided). In that case fall back to the minimum a UE
+   // must support (1 layer), as is done for PUSCH in nr_ue_scheduler.c.
+   if (max_mimo_layers <= 0)
+     max_mimo_layers = 1;
++// <<< AraSDR/AraRACH contribution (end)
+   int nl_tbslbrm = max_mimo_layers < 4 ? max_mimo_layers : 4;
+   dlsch_pdu->tbslbrm = nr_compute_tbslbrm(dlsch_pdu->mcs_table, sc_info->dl_bw_tbslbrm, nl_tbslbrm);
+   /*PTRS configuration */
+diff --git a/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c b/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c
+index 9be390961d..3f058237e2 100644
+--- a/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c
++++ b/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c
+@@ -54,10 +54,13 @@ void print_ue_mac_stats(const module_id_t mod, const int frame_rx, const int slo
+   cur += snprintf(cur, end - cur, "    DL harq: %lu", mac->stats.dl.rounds[0]);
+   int nb;
+   for (nb = NR_MAX_HARQ_ROUNDS_FOR_STATS - 1; nb > 1; nb--)
++// >>> AraSDR/AraRACH contribution (begin)
+     if (mac->stats.dl.rounds[nb])
++// <<< AraSDR/AraRACH contribution (end)
+       break;
+   for (int i = 1; i < nb + 1; i++)
+     cur += snprintf(cur, end - cur, "/%lu", mac->stats.dl.rounds[i]);
++// >>> AraSDR/AraRACH contribution (begin)
+   if (mac->stats.dl.total_bits > 0 && mac->stats.dl.total_symbols > 0)
+     cur += snprintf(cur,
+                     end - cur,
+@@ -67,6 +70,7 @@ void print_ue_mac_stats(const module_id_t mod, const int frame_rx, const int slo
+                     (double)mac->stats.dl.total_bits / mac->stats.dl.total_symbols,
+                     mac->stats.dl.rb_size / nbdl,
+                     mac->stats.dl.nr_of_symbols / nbdl);
++// <<< AraSDR/AraRACH contribution (end)
+ 
+   cur += snprintf(cur, end - cur, "\n    UL harq: %lu", mac->stats.ul.rounds[0]);
+   for (nb = NR_MAX_HARQ_ROUNDS_FOR_STATS - 1; nb > 1; nb--)
+diff --git a/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf b/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf
+index 60f4f07067..4f1518876d 100644
+--- a/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf
++++ b/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf
+@@ -4,13 +4,19 @@ uicc0 = {
+ imsi = "2089900007487";
+ key = "fec86ba6eb707ed08905757b1bb44b8f";
+ opc= "C42449363BBAD02B66D16BC975D77CC1";
++# >>> AraSDR/AraRACH contribution (begin)
+ pdu_sessions = ({ dnn = "internet"; nssai_sst = 1; nssai_sd = 1; });
++# <<< AraSDR/AraRACH contribution (end)
+ }
+ 
++# >>> AraSDR/AraRACH contribution (begin)
+ #position0 = {
+ #    x = 0.0;
+ #    y = 0.0;
+ #    z = 6377900.0;
+ #}
++# <<< AraSDR/AraRACH contribution (end)
+ 
++# >>> AraSDR/AraRACH contribution (begin)
+ #@include "channelmod_rfsimu_LEO_satellite.conf"
++# <<< AraSDR/AraRACH contribution (end)

@@ -1,0 +1,105 @@
+From 33178874d259cc1549797e2a6c94978a472e48d2 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 12 Aug 2026 18:15:34 -0500
+Subject: [PATCH 33/52] kaiair: DL loop stale-report gate, freeze on re-sent
+ measurements (sparse-traffic limit cycle)
+
+The UE re-reports its last measurement between PDSCH arrivals; with only
+keeper probes (~1 packet / 5 s) a report can be seconds old and reflect a
+long-gone offset, so acting on it produced a ~5 s shed<->restore limit cycle
+(offset slamming 0<->15 in sync with the probe cadence). Detector: an
+unchanged report value after our offset moved past the 2 dB report
+quantization cannot be tracking the actuation -> telemetry-only update, no
+estimator push, no integrator step, until a fresh sample arrives.
+Verified: offset holds rock-steady through stale stretches and adjusts once
+per fresh measurement; with the 10 Hz keepalive restored the loop regulates
+smoothly (shed ~10 dB, SINR on gamma_DL 10 + ~4 cushion).
+---
+ lib/scheduler/kaiair/pktr_dl_power_controller.h |  7 +++++--
+ lib/scheduler/ue_context/ue_cell.cpp            | 15 +++++++++++++--
+ lib/scheduler/ue_context/ue_cell.h              |  8 ++++++++
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_dl_power_controller.h b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+index 605ba6bcab..66fc94f95b 100644
+--- a/lib/scheduler/kaiair/pktr_dl_power_controller.h
++++ b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+@@ -73,7 +73,10 @@ public:
+   /// Cantelli cushion). Drives pwr_ctrl_offset by the SINR error directly (IPC set-point form):
+   /// SINR above target -> shed more power (offset up), below -> restore power (offset down). The
+   /// per-report step is clamped so one noisy report cannot slam the offset across its range.
+-  void update_sinr(float sinr_db, float target_db, float max_offset_db = 15.0F)
++  /// \p act = false: telemetry-only update, record the report/target but do NOT step the
++  /// integrator (used when the caller detected the report is a STALE re-send; acting on those
++  /// limit-cycles the loop under sparse DL traffic).
++  void update_sinr(float sinr_db, float target_db, float max_offset_db = 15.0F, bool act = true)
+   {
+     sinr_mode_          = true; // latches: reports are periodic while the UE is attached
+     latest_dl_sinr_db_  = sinr_db;
+@@ -83,7 +86,7 @@ public:
+     // record the offset that was in force BEFORE this report's step is applied.
+     offset_prev2_report_db_ = offset_prev_report_db_;
+     offset_prev_report_db_  = offset_db_;
+-    if (not enabled_now()) {
++    if (not enabled_now() or not act) {
+       return;
+     }
+     const float err = sinr_db - target_db; // >0: headroom to shed
+diff --git a/lib/scheduler/ue_context/ue_cell.cpp b/lib/scheduler/ue_context/ue_cell.cpp
+index 56b5aecadf..5fb8395370 100644
+--- a/lib/scheduler/ue_context/ue_cell.cpp
++++ b/lib/scheduler/ue_context/ue_cell.cpp
+@@ -184,13 +184,24 @@ void ue_cell::kaiair_handle_dl_sinr(float dl_sinr_db)
+   // Without this, the loop's own actuation inflates Var[SINR] and the Cantelli cushion chases a
+   // self-made disturbance (bench-observed 6-9 dB cushion breathing).
+   const float off_meas = pktr_dl_pc_.offset_at_measurement();
++  // Stale-report detector (see header): unchanged report value + offset moved past the 2 dB report
++  // quantization => the report is a re-sent old measurement (sparse DL traffic), NOT a response to
++  // our actuation. Neither learn from it nor act on it, freeze until a fresh sample arrives.
++  const bool kaiair_fresh_value = dl_sinr_db != kaiair_dl_last_report_db_;
++  const bool kaiair_stale =
++      (not kaiair_fresh_value) and std::abs(pktr_dl_pc_.offset_db() - kaiair_dl_offset_at_report_) > 2.0F;
++  if (kaiair_fresh_value) {
++    kaiair_dl_last_report_db_    = dl_sinr_db;
++    kaiair_dl_offset_at_report_ = pktr_dl_pc_.offset_db();
++  }
+   // Linear-regime gate: the FPE normalization assumes the actuator is dB-linear in the REPORT, but
+   // once the shed pushes the PDSCH to/below the UE noise floor the reported SINR saturates (bench:
+   // shed 15 -> reported ~-3 while true FPE ~9), so sample+offset OVERESTIMATES and the corrupted
+   // mean/sigma drive a shed<->restore bang-bang cycle. Only samples measured with little shed or
+   // comfortably above the floor enter the estimator.
+   const bool kaiair_linear_regime = (off_meas < 0.5F) or (dl_sinr_db > 5.0F);
+-  if ((not pktr_dl_pc_.sinr_mode() or pktr_dl_pc_.offset_stable_at_measurement()) and kaiair_linear_regime) {
++  if ((not pktr_dl_pc_.sinr_mode() or pktr_dl_pc_.offset_stable_at_measurement()) and kaiair_linear_regime and
++      not kaiair_stale) {
+     pktr_dl_link_state_.push_ul_measurement(dl_sinr_db + off_meas, 0.0F); // FPE sample; sigma = std of channel
+   }
+ 
+@@ -212,7 +223,7 @@ void ue_cell::kaiair_handle_dl_sinr(float dl_sinr_db)
+   // Shed ceiling: keep the predicted REPORTED SINR >= ~5 dB (above the UE noise-floor saturation)
+   // so the loop never sheds itself blind. Full authority until the estimator is warm.
+   const float max_shed_db = warm ? std::max(0.0F, fpe_mean_db - 5.0F) : 15.0F;
+-  pktr_dl_pc_.update_sinr(loop_sinr_db, gamma + cushion, max_shed_db);
++  pktr_dl_pc_.update_sinr(loop_sinr_db, gamma + cushion, max_shed_db, /*act=*/not kaiair_stale);
+ 
+   if (s.debug_tpc and (pktr_dl_pc_.nof_sinr_reports() % 50 == 1)) {
+     fmt::print("[KaiAir/PktR DL-SINR] rnti={:#06x} DL SINR={:.1f} dB target={:.1f} (gamma_DL={:.1f} + cushion={:.2f}) "
+diff --git a/lib/scheduler/ue_context/ue_cell.h b/lib/scheduler/ue_context/ue_cell.h
+index 98dc88ad5b..a23d5dd660 100644
+--- a/lib/scheduler/ue_context/ue_cell.h
++++ b/lib/scheduler/ue_context/ue_cell.h
+@@ -235,6 +235,14 @@ private:
+   /// the target line breathe; smoothing steadies both the GUI red line and the loop setpoint.
+   float kaiair_dl_cushion_smooth_ = -1.0F; // <0 = uninitialized (seed on first sample)
+ 
++  /// KaiAir DL-SINR stale-report detector: the UE re-reports its LAST measurement between (sparse)
++  /// PDSCH arrivals, so a report can be seconds old and reflect a long-gone offset, acting on it
++  /// limit-cycles the loop. Track the last distinct report value and the offset in force when it
++  /// first appeared; an unchanged value after the offset moved past the 2 dB report quantization
++  /// cannot be tracking the actuation and is treated as stale.
++  float kaiair_dl_last_report_db_    = -1000.0F;
++  float kaiair_dl_offset_at_report_ = 0.0F;
++
+   /// \brief Whether cell is currently active.
+   bool active = true;
+ 

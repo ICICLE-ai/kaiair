@@ -1,0 +1,27 @@
+From b25059d1b438e63e7fd66117d85d5f77ceea7219 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 21 Jul 2026 10:55:31 -0500
+Subject: [PATCH 17/52] kaiair: add dl_sinr_est_db (CQI-derived) to the PktR
+ metrics JSON
+
+The GUI needs a DL quality figure next to the UL SINR; DL SINR is not measurable
+at the gNB (it is the DL transmitter), so emit the Tier-A CQI->SINR estimate
+(1.9*CQI - 5 dB) already used by the console view. null when no CQI this interval.
+---
+ .../du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp     | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 103a906101..082aead160 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -97,6 +97,9 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+     num("tpc_db", has_snr and has_ni, (gamma_live + cushion) - ue.pusch_snr_db);
+ 
+     inum("dl_cqi", has_cqi, static_cast<long>(std::lround(ue.cqi_stats.get_mean())));
++    // DL SINR is not measurable at the gNB (it is the DL transmitter); emit the Tier-A
++    // CQI-derived estimate so the GUI can chart a DL quality figure alongside the UL SINR.
++    num("dl_sinr_est_db", has_cqi, cqi_to_sinr_db_estimate(ue.cqi_stats.get_mean()));
+     num("dl_bler_pct", dl_tot > 0, 100.0 * static_cast<double>(ue.dl_nof_nok) / static_cast<double>(dl_tot));
+ 
+     // UL access delay: SR-to-PUSCH if available, else the PUSCH HARQ delay.

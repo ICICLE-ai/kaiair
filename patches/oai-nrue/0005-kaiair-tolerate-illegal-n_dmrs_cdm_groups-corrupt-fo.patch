@@ -1,0 +1,48 @@
+From ed1725cc210cf620a2d92b4f50739d69a28b4694 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Fri, 31 Jul 2026 14:48:08 -0500
+Subject: [PATCH 05/12] kaiair: tolerate illegal n_dmrs_cdm_groups
+ (corrupt/foreign DCI) - drop PDSCH instead of AssertFatal
+
+Post-antenna-swap the UE crash-looped on n_dmrs_cdm_groups==0 right after RA
+(preceded by a bogus 'SRS trigger 3' DCI - the foreign-cell PDCCH signature).
+A robust UE drops garbage; the decode CRC-fails and NACKs like any bad packet.
+---
+ .../NR_UE_TRANSPORT/nr_dlsch_demodulation.c   | 24 ++++++++++---------
+ 1 file changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+index 33eecaa70b..9b94dd54aa 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+@@ -165,17 +165,19 @@ static void nr_dlsch_extract_rbs(uint32_t rxdataF_sz,
+ {
+   int config_type = dlsch_config->dmrsConfigType;
+   int n_dmrs_cdm_groups = dlsch_config->n_dmrs_cdm_groups;
+-  if (config_type == NFAPI_NR_DMRS_TYPE1)
+-    AssertFatal(n_dmrs_cdm_groups == 1
+-                || n_dmrs_cdm_groups == 2,
+-                "n_dmrs_cdm_groups %d is illegal\n",
+-                n_dmrs_cdm_groups);
+-  else
+-    AssertFatal(n_dmrs_cdm_groups == 1
+-                || n_dmrs_cdm_groups == 2 
+-                || n_dmrs_cdm_groups == 3,
+-                "n_dmrs_cdm_groups %d is illegal\n",
+-                n_dmrs_cdm_groups);
++  // KaiAir bench hardening: corrupt or foreign-cell DCIs (false CRC passes on the PDCCH blind
++  // decode; observed on the ARA bench with cross-cell reception) can land here with
++  // n_dmrs_cdm_groups == 0. Stock OAI AssertFatal's and KILLS the UE process; drop the PDSCH
++  // instead (the decode then CRC-fails and NACKs like any bad packet, and the UE lives on).
++  const int kaiair_cdm_ok = (config_type == NFAPI_NR_DMRS_TYPE1)
++                                ? (n_dmrs_cdm_groups == 1 || n_dmrs_cdm_groups == 2)
++                                : (n_dmrs_cdm_groups == 1 || n_dmrs_cdm_groups == 2 || n_dmrs_cdm_groups == 3);
++  if (!kaiair_cdm_ok) {
++    LOG_E(PHY,
++          "[KaiAir] illegal n_dmrs_cdm_groups %d (corrupt/foreign DCI?) - skipping PDSCH extraction\n",
++          n_dmrs_cdm_groups);
++    return;
++  }
+ 
+   uint32_t dmrs_rb_bitmap = 0;
+   if (pilots) {

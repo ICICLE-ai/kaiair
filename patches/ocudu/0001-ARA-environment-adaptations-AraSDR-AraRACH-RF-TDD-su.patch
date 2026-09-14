@@ -1,0 +1,430 @@
+From 08c2d8f85dc2cf557fedcb7e11ba9f1d878bd1c3 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 22 Jun 2026 12:45:06 -0500
+Subject: [PATCH 01/52] ARA environment adaptations: AraSDR/AraRACH RF/TDD
+ support
+
+Faithful capture of the uncommitted working-tree changes on the ARA gNB
+container (kaiair-bs-1) atop upstream ocudu dev @ 67dab6bc. Enables the
+USRP X310 TDD deployment used by the ARA testbed:
+  - lower-PHY discontinuous-TX burst gating (drop UL/special slots; cut
+    partial DL slots at the last active symbol)
+  - X3x0/X410/N3x0 FP0 GPIO ATR gating of the external PA/RF switch in
+    sync with the TDD pattern (without it the radio does not transmit)
+  - RU SDR config plumbing of the TDD pattern + lower-PHY test coverage
+
+Captured by KaiAir; original work by the AraSDR/AraRACH effort.
+
+Co-authored-by: AraSDR/AraRACH <arawireless@iastate.edu>
+---
+ .../helpers/ru_sdr_config_translator.cpp      |  14 +++
+ .../ocudu/phy/lower/lower_phy_configuration.h |   4 +
+ .../downlink/downlink_processor_factories.h   |   3 +
+ lib/phy/lower/lower_phy_factory.cpp           |   3 +-
+ .../lower/processors/downlink/CMakeLists.txt  |   2 +-
+ .../downlink_processor_baseband_impl.cpp      |  39 ++++++-
+ .../downlink_processor_baseband_impl.h        |   7 ++
+ .../downlink/downlink_processor_factories.cpp |   3 +-
+ lib/radio/uhd/radio_uhd_device.h              |  20 +++-
+ lib/radio/uhd/radio_uhd_tx_stream.cpp         |   2 +-
+ tests/unittests/phy/lower/lower_phy_test.cpp  |   1 +
+ .../lower_phy_downlink_processor_test.cpp     | 108 ++++++++++++++++++
+ 12 files changed, 196 insertions(+), 10 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp b/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp
+index 75c1f1bacd..ad8a22e2f8 100644
+--- a/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp
++++ b/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp
+@@ -6,6 +6,7 @@
+ #include "apps/services/worker_manager/worker_manager_config.h"
+ #include "ru_sdr_config.h"
+ #include "ocudu/ran/band_helper.h"
++#include <algorithm>
+ 
+ using namespace ocudu;
+ 
+@@ -31,6 +32,7 @@ static lower_phy_configuration generate_lower_phy_config(const flexible_o_du_ru_
+   out_cfg.ul_freq_hz                 = band_helper::nr_arfcn_to_freq(config.ul_arfcn);
+   out_cfg.nof_tx_ports               = config.nof_tx_antennas;
+   out_cfg.nof_rx_ports               = config.nof_rx_antennas;
++  out_cfg.tdd_config                 = config.tdd_config;
+   out_cfg.dft_window_offset          = 0.5F;
+   out_cfg.max_processing_delay_slots = max_processing_delay_slot;
+   out_cfg.srate                      = sampling_rate::from_MHz(ru_cfg.srate_MHz);
+@@ -140,6 +142,18 @@ static void generate_radio_config(radio_configuration::radio&
+   out_cfg.tx_mode          = radio_configuration::to_transmission_mode(ru_cfg.expert_cfg.transmission_mode);
+   out_cfg.power_ramping_us = ru_cfg.expert_cfg.power_ramping_time_us;
+ 
++  // For TDD cells, the lower PHY emits is_empty / tx_end metadata to gate the radio on the TDD pattern; that gating
++  // is only honored when the UHD TX stream runs in discontinuous mode. If the user left the default ("continuous") and
++  // any cell is TDD, promote to discontinuous so the front-end PA is actually keyed in sync with DL bursts.
++  if (out_cfg.tx_mode == radio_configuration::transmission_mode::continuous &&
++      std::any_of(cells.begin(), cells.end(), [](const flexible_o_du_ru_config::cell_config& cell) {
++        return cell.tdd_config.has_value();
++      })) {
++    fmt::print("TDD cell detected: forcing radio tx_mode to 'discontinuous' so the RF front-end follows the TDD "
++               "pattern. Set tx_mode explicitly to override.\n");
++    out_cfg.tx_mode = radio_configuration::transmission_mode::discontinuous;
++  }
++
+   std::vector<std::string> zmq_tx_addr = extract_zmq_ports(ru_cfg.device_arguments, "tx_port");
+   std::vector<std::string> zmq_rx_addr = extract_zmq_ports(ru_cfg.device_arguments, "rx_port");
+ 
+diff --git a/include/ocudu/phy/lower/lower_phy_configuration.h b/include/ocudu/phy/lower/lower_phy_configuration.h
+index 3ae45d4e6e..32301c9959 100644
+--- a/include/ocudu/phy/lower/lower_phy_configuration.h
++++ b/include/ocudu/phy/lower/lower_phy_configuration.h
+@@ -17,6 +17,7 @@
+ #include "ocudu/ran/cyclic_prefix.h"
+ #include "ocudu/ran/n_ta_offset.h"
+ #include "ocudu/ran/subcarrier_spacing.h"
++#include "ocudu/ran/tdd/tdd_ul_dl_config.h"
+ #include "ocudu/support/executors/task_executor.h"
+ 
+ namespace ocudu {
+@@ -56,6 +57,9 @@ struct lower_phy_configuration {
+   unsigned nof_tx_ports;
+   /// Number of receive ports.
+   unsigned nof_rx_ports;
++  /// \brief TDD UL/DL configuration. If set, the lower PHY uses it to gate the downlink burst on TDD boundaries via
++  /// the transmitter metadata (\c is_empty / \c tx_end). Leave unset for FDD.
++  std::optional<tdd_ul_dl_config_common> tdd_config;
+   /// Shifts the DFT window by a fraction of the cyclic prefix [0, 1).
+   float dft_window_offset;
+   /// \brief Number of slots the timing handler is notified in advance of the transmission time.
+diff --git a/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h b/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h
+index 3d796dd225..bd57d2ce73 100644
+--- a/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h
++++ b/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h
+@@ -7,6 +7,7 @@
+ #include "ocudu/phy/lower/processors/downlink/downlink_processor.h"
+ #include "ocudu/phy/lower/processors/downlink/pdxch/pdxch_processor_factories.h"
+ #include "ocudu/phy/lower/sampling_rate.h"
++#include "ocudu/ran/tdd/tdd_ul_dl_config.h"
+ #include <memory>
+ 
+ namespace ocudu {
+@@ -29,6 +30,8 @@ struct downlink_processor_configuration {
+   unsigned nof_tx_ports;
+   /// Number of slots notified in advance in the TTI boundary event.
+   unsigned nof_slot_tti_in_advance;
++  /// TDD UL/DL configuration. If set, the downlink processor masks non-DL symbols via the transmitter metadata.
++  std::optional<tdd_ul_dl_config_common> tdd_config;
+ };
+ 
+ /// Lower physical layer downlink processor - Factory interface.
+diff --git a/lib/phy/lower/lower_phy_factory.cpp b/lib/phy/lower/lower_phy_factory.cpp
+index 21f01b2092..3a2ad819f4 100644
+--- a/lib/phy/lower/lower_phy_factory.cpp
++++ b/lib/phy/lower/lower_phy_factory.cpp
+@@ -107,7 +107,8 @@ public:
+                                                        .bandwidth_prb           = config.bandwidth_rb,
+                                                        .center_frequency_Hz     = config.dl_freq_hz,
+                                                        .nof_tx_ports            = config.nof_tx_ports,
+-                                                       .nof_slot_tti_in_advance = config.max_processing_delay_slots};
++                                                       .nof_slot_tti_in_advance = config.max_processing_delay_slots,
++                                                       .tdd_config              = config.tdd_config};
+ 
+     // Create downlink processor.
+     std::unique_ptr<lower_phy_downlink_processor> dl_proc =
+diff --git a/lib/phy/lower/processors/downlink/CMakeLists.txt b/lib/phy/lower/processors/downlink/CMakeLists.txt
+index 966fdd1e8a..6b0dbd0b2e 100644
+--- a/lib/phy/lower/processors/downlink/CMakeLists.txt
++++ b/lib/phy/lower/processors/downlink/CMakeLists.txt
+@@ -10,4 +10,4 @@ add_library(ocudu_lower_phy_downlink_processor STATIC
+         downlink_processor_factories.cpp
+         downlink_processor_impl.cpp)
+ 
+-target_link_libraries(ocudu_lower_phy_downlink_processor ocuduvec ocudu_instrumentation)
+\ No newline at end of file
++target_link_libraries(ocudu_lower_phy_downlink_processor ocuduvec ocudu_instrumentation ocudu_ran)
+\ No newline at end of file
+diff --git a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp
+index e2341b9cce..f3171fe104 100644
+--- a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp
++++ b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp
+@@ -23,6 +23,8 @@ downlink_processor_baseband_impl::downlink_processor_baseband_impl(
+   sector_id(config.sector_id),
+   rate(config.rate),
+   scs(config.scs),
++  cp(config.cp),
++  tdd_config(config.tdd_config),
+   nof_samples_per_subframe(config.rate.to_kHz()),
+   nof_slots_per_subframe(get_nof_slots_per_subframe(config.scs)),
+   nof_symbols_per_slot(get_nsymb_per_slot(config.cp)),
+@@ -162,11 +164,13 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
+     notifier->on_new_metrics(pdxch_baseband_result.metrics);
+   }
+ 
++  processing_result result;
++
+   // Align with the next slot using a different baseband buffer if the next sample is not aligned with the beginning of
+   // a slot or no PDxCH baseband is available to transmit.
+   if ((i_sample_slot != 0) || !pdxch_baseband_result.buffer) {
+     // Prepare result metadata and obtain baseband buffer from the pool.
+-    processing_result result = {.metadata = {.ts = timestamp, .is_empty = true}, .buffer = buffer_pool.get()};
++    result = {.metadata = {.ts = timestamp, .is_empty = true}, .buffer = buffer_pool.get()};
+     report_fatal_error_if_not(result.buffer, "Failed to retrieve a baseband buffer.");
+ 
+     // Calculate the number of samples to the next slot.
+@@ -183,13 +187,38 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
+       fill_zeros(result.buffer->get_writer(), result.metadata);
+       result.metadata.is_empty = true;
+     }
++  } else {
++    // Prepare result metadata.
++    result = {.metadata = {.ts = timestamp, .is_empty = false}, .buffer = std::move(pdxch_baseband_result.buffer)};
++  }
++
++  // Apply TDD burst gating, if configured. For non-DL slots we mark the buffer empty so the radio drops the burst;
++  // for partial DL slots we set tx_end so the radio cuts the burst at the last active DL symbol.
++  if (tdd_config && !result.metadata.is_empty) {
++    const ofdm_symbol_range active_dl_symbols = get_active_tdd_dl_symbols(*tdd_config, i_slot, cp);
+ 
+-    return result;
++    if (active_dl_symbols.length() == 0) {
++      // Slot has no active DL symbols (UL or special slot), drop the burst.
++      result.metadata.is_empty = true;
++    } else if (active_dl_symbols.length() < nof_symbols_per_slot) {
++      // Partial DL slot, compute sample offset of the first symbol after the last active DL symbol, within the slot.
++      const unsigned dl_end_sample_in_slot =
++          std::accumulate(symbol_sizes_slot.begin(), symbol_sizes_slot.begin() + active_dl_symbols.stop(), 0U);
++
++      if (dl_end_sample_in_slot <= i_sample_slot) {
++        // This buffer starts after the last active DL symbol, nothing to transmit.
++        result.metadata.is_empty = true;
++      } else {
++        const unsigned dl_end_in_buffer = dl_end_sample_in_slot - i_sample_slot;
++        // Only set tx_end if the DL burst genuinely ends inside this buffer.
++        if (dl_end_in_buffer < result.buffer->get_nof_samples()) {
++          result.metadata.tx_end = dl_end_in_buffer;
++        }
++      }
++    }
+   }
+ 
+-  // Prepare result metadata.
+-  return processing_result{.metadata = {.ts = timestamp, .is_empty = false},
+-                           .buffer   = std::move(pdxch_baseband_result.buffer)};
++  return result;
+ }
+ 
+ void downlink_processor_baseband_impl::set_tx_time_offset(phy_time_unit tx_time_offset_)
+diff --git a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h
+index e31c8ad972..20f115f285 100644
+--- a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h
++++ b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h
+@@ -18,6 +18,7 @@
+ #include "ocudu/phy/lower/sampling_rate.h"
+ #include "ocudu/ran/cyclic_prefix.h"
+ #include "ocudu/ran/slot_point_extended.h"
++#include "ocudu/ran/tdd/tdd_ul_dl_config.h"
+ #include "ocudu/support/math/stats.h"
+ 
+ namespace ocudu {
+@@ -36,6 +37,8 @@ struct downlink_processor_baseband_configuration {
+   unsigned nof_tx_ports;
+   /// Number of slots notified in advance in the TTI boundary event.
+   unsigned nof_slot_tti_in_advance;
++  /// TDD UL/DL configuration. If set, the processor masks non-DL symbols via the transmitter metadata.
++  std::optional<tdd_ul_dl_config_common> tdd_config;
+ };
+ 
+ namespace detail {
+@@ -208,6 +211,10 @@ private:
+   sampling_rate rate;
+   /// Subcarrier spacing.
+   subcarrier_spacing scs;
++  /// Cyclic prefix configuration. Needed for TDD symbol-range calculations.
++  cyclic_prefix cp;
++  /// TDD UL/DL configuration. Empty for FDD.
++  std::optional<tdd_ul_dl_config_common> tdd_config;
+   /// Number of samples per subframe.
+   unsigned nof_samples_per_subframe;
+   /// Number of slots per subframe.
+diff --git a/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp b/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp
+index e8156e0b37..f8f8b66c10 100644
+--- a/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp
++++ b/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp
+@@ -35,7 +35,8 @@ public:
+                                                                  .rate         = config.rate,
+                                                                  .nof_tx_ports = config.nof_tx_ports,
+                                                                  .nof_slot_tti_in_advance =
+-                                                                     config.nof_slot_tti_in_advance};
++                                                                     config.nof_slot_tti_in_advance,
++                                                                 .tdd_config = config.tdd_config};
+ 
+     return std::make_unique<downlink_processor_impl>(pdxch_proc_factory->create(pdxch_proc_config, modulation_executor),
+                                                      baseband_config);
+diff --git a/lib/radio/uhd/radio_uhd_device.h b/lib/radio/uhd/radio_uhd_device.h
+index 551ac44360..c33f7442af 100644
+--- a/lib/radio/uhd/radio_uhd_device.h
++++ b/lib/radio/uhd/radio_uhd_device.h
+@@ -138,7 +138,25 @@ public:
+ 
+     fmt::print("Making USRP object with args '{}'\n", device_addr.to_string());
+ 
+-    return safe_execution([this, &device_addr]() { usrp = uhd::usrp::multi_usrp::make(device_addr); });
++    return safe_execution([this, &device_addr]() {
++      usrp = uhd::usrp::multi_usrp::make(device_addr);
++      // Configure the FP0 GPIO bank for TDD RF front-end control on USRP types that expose it.
++      // The ATR (Automatic Transmit/Receive) controller drives pins 0..6 according to the radio state, so that an
++      // external RF switch / PA can be gated in sync with the TDD pattern. Pins 7..11 stay under manual control.
++      if (type == radio_uhd_device_type::types::X3x0 || type == radio_uhd_device_type::types::X410 ||
++          type == radio_uhd_device_type::types::N3x0 || type == radio_uhd_device_type::types::N32x) {
++        fmt::print("Setting FP0 GPIO for TDD RF front-end on {}.\n", type.to_string());
++        // Lower 7 bits driven by ATR; upper bits remain manual.
++        usrp->set_gpio_attr("FP0", "CTRL", 0x7f, 0x7f);
++        // DDR = output for the same 7 bits.
++        usrp->set_gpio_attr("FP0", "DDR", 0x7f, 0x7f);
++        // Drive the lower 7 pins high whenever the radio is transmitting, covers both TX-only (ATR_TX, the active
++        // state during a discontinuous DL burst) and full-duplex (ATR_XX, the steady state in continuous TX). Without
++        // ATR_TX the external PA stays disabled across DL bursts in discontinuous mode and nothing radiates.
++        usrp->set_gpio_attr("FP0", "ATR_TX", 0x7f, 0x7f);
++        usrp->set_gpio_attr("FP0", "ATR_XX", 0x7f, 0x7f);
++      }
++    });
+   }
+ 
+   bool is_connection_valid()
+diff --git a/lib/radio/uhd/radio_uhd_tx_stream.cpp b/lib/radio/uhd/radio_uhd_tx_stream.cpp
+index ee6668dcc7..d1ac2d2ed8 100644
+--- a/lib/radio/uhd/radio_uhd_tx_stream.cpp
++++ b/lib/radio/uhd/radio_uhd_tx_stream.cpp
+@@ -11,7 +11,7 @@ using namespace ocudu;
+ /// Receive asynchronous message timeout in seconds.
+ static constexpr double RECV_ASYNC_MSG_TIMEOUT_S = 0.001;
+ /// Transmit timeout in seconds.
+-static constexpr double TRANSMIT_TIMEOUT_S = 0.001;
++static constexpr double TRANSMIT_TIMEOUT_S = 0.002;
+ 
+ void radio_uhd_tx_stream::recv_async_msg()
+ {
+diff --git a/tests/unittests/phy/lower/lower_phy_test.cpp b/tests/unittests/phy/lower/lower_phy_test.cpp
+index b1ec9c1176..2f21bd5384 100644
+--- a/tests/unittests/phy/lower/lower_phy_test.cpp
++++ b/tests/unittests/phy/lower/lower_phy_test.cpp
+@@ -27,6 +27,7 @@ namespace ocudu {
+ 
+ auto to_tuple(const downlink_processor_configuration& config)
+ {
++  // tdd_config is excluded, tdd_ul_dl_config_common has no operator==.
+   return std::tie(config.sector_id,
+                   config.scs,
+                   config.cp,
+diff --git a/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp b/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp
+index 486e235c98..7e37348399 100644
+--- a/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp
++++ b/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp
+@@ -384,3 +384,111 @@ INSTANTIATE_TEST_SUITE_P(
+                        ::testing::Values(std::make_tuple(subcarrier_spacing::kHz15, cyclic_prefix::NORMAL),
+                                          std::make_tuple(subcarrier_spacing::kHz30, cyclic_prefix::NORMAL),
+                                          std::make_tuple(subcarrier_spacing::kHz60, cyclic_prefix::EXTENDED))));
++
++// Verifies that the TDD-aware burst gating in downlink_processor_baseband_impl produces the right metadata
++// (is_empty / tx_end) for full-DL, partial-DL (special) and UL slots, walking one full TDD period at slot boundaries.
++TEST(LowerPhyDownlinkProcessorTddGating, FullDlSpecialAndUlSlots)
++{
++  static constexpr subcarrier_spacing scs          = subcarrier_spacing::kHz30;
++  static constexpr cyclic_prefix      cp           = cyclic_prefix::NORMAL;
++  const sampling_rate                 srate        = sampling_rate::from_MHz(7.68);
++  static constexpr unsigned           nof_tx_ports = 1;
++
++  // DDDDDDDSUU: 10 slots/period, 7 full DL, 1 special (6 DL symbols), 2 full UL, no UL symbols in the DL→UL boundary.
++  tdd_ul_dl_config_common tdd{.ref_scs  = scs,
++                              .pattern1 = {.dl_ul_tx_period_nof_slots = 10,
++                                           .nof_dl_slots              = 7,
++                                           .nof_dl_symbols            = 6,
++                                           .nof_ul_slots              = 2,
++                                           .nof_ul_symbols            = 0}};
++
++  manual_task_worker                                    modulation_executor(MAX_NSYMB_PER_SLOT * MAX_PORTS);
++  std::shared_ptr<pdxch_processor_factory_spy>          pdxch_proc_factory = std::make_shared<pdxch_processor_factory_spy>();
++  std::shared_ptr<lower_phy_downlink_processor_factory> dl_proc_factory =
++      create_downlink_processor_factory_sw(pdxch_proc_factory);
++
++  downlink_processor_configuration config = {.sector_id           = 0,
++                                             .scs                 = scs,
++                                             .cp                  = cp,
++                                             .rate                = srate,
++                                             .bandwidth_prb       = MAX_NOF_PRBS,
++                                             .center_frequency_Hz = 3.5e6,
++                                             .nof_tx_ports        = nof_tx_ports,
++                                             .tdd_config          = tdd};
++
++  std::unique_ptr<lower_phy_downlink_processor> dl_processor = dl_proc_factory->create(config, modulation_executor);
++  ASSERT_NE(dl_processor, nullptr);
++
++  downlink_processor_notifier_spy downlink_proc_notifier_spy;
++  pdxch_processor_notifier_spy    pdxch_proc_notifier_spy;
++  dl_processor->connect(downlink_proc_notifier_spy, pdxch_proc_notifier_spy);
++  downlink_processor_baseband& dl_proc_baseband = dl_processor->get_baseband();
++
++  // Walk one full TDD period starting at slot 0 (timestamp 0 ⇒ aligned to a slot boundary). The PDxCH spy uses a
++  // single-buffer pool, so each iteration must release its buffer before the next process() call.
++  baseband_gateway_timestamp timestamp = 0;
++  for (unsigned i_slot = 0; i_slot != 10; ++i_slot) {
++    auto r = dl_proc_baseband.process(timestamp);
++    ASSERT_TRUE(r.buffer) << "slot " << i_slot;
++    unsigned nof_samples = r.buffer->get_nof_samples();
++
++    if (i_slot <= 6) {
++      // Full DL: nothing gated.
++      EXPECT_FALSE(r.metadata.is_empty) << "slot " << i_slot;
++      EXPECT_FALSE(r.metadata.tx_end.has_value()) << "slot " << i_slot;
++    } else if (i_slot == 7) {
++      // Special slot (6 DL symbols): non-empty with tx_end set strictly inside the buffer.
++      EXPECT_FALSE(r.metadata.is_empty);
++      ASSERT_TRUE(r.metadata.tx_end.has_value());
++      EXPECT_GT(*r.metadata.tx_end, 0U);
++      EXPECT_LT(*r.metadata.tx_end, nof_samples);
++    } else {
++      // Slots 8..9 are full UL: burst dropped.
++      EXPECT_TRUE(r.metadata.is_empty) << "slot " << i_slot;
++    }
++
++    timestamp += nof_samples;
++    r.buffer = nullptr;
++  }
++}
++
++// Verifies that without a TDD configuration the gating path is inert: every slot stays non-empty with no tx_end.
++TEST(LowerPhyDownlinkProcessorTddGating, FddPathUnaffected)
++{
++  static constexpr subcarrier_spacing scs          = subcarrier_spacing::kHz30;
++  static constexpr cyclic_prefix      cp           = cyclic_prefix::NORMAL;
++  const sampling_rate                 srate        = sampling_rate::from_MHz(7.68);
++  static constexpr unsigned           nof_tx_ports = 1;
++
++  manual_task_worker                                    modulation_executor(MAX_NSYMB_PER_SLOT * MAX_PORTS);
++  std::shared_ptr<pdxch_processor_factory_spy>          pdxch_proc_factory = std::make_shared<pdxch_processor_factory_spy>();
++  std::shared_ptr<lower_phy_downlink_processor_factory> dl_proc_factory =
++      create_downlink_processor_factory_sw(pdxch_proc_factory);
++
++  // No tdd_config: FDD path.
++  downlink_processor_configuration config = {.sector_id           = 0,
++                                             .scs                 = scs,
++                                             .cp                  = cp,
++                                             .rate                = srate,
++                                             .bandwidth_prb       = MAX_NOF_PRBS,
++                                             .center_frequency_Hz = 3.5e6,
++                                             .nof_tx_ports        = nof_tx_ports};
++
++  std::unique_ptr<lower_phy_downlink_processor> dl_processor = dl_proc_factory->create(config, modulation_executor);
++  ASSERT_NE(dl_processor, nullptr);
++
++  downlink_processor_notifier_spy downlink_proc_notifier_spy;
++  pdxch_processor_notifier_spy    pdxch_proc_notifier_spy;
++  dl_processor->connect(downlink_proc_notifier_spy, pdxch_proc_notifier_spy);
++  downlink_processor_baseband& dl_proc_baseband = dl_processor->get_baseband();
++
++  baseband_gateway_timestamp timestamp = 0;
++  for (unsigned i_slot = 0; i_slot != 10; ++i_slot) {
++    auto r = dl_proc_baseband.process(timestamp);
++    ASSERT_TRUE(r.buffer) << "slot " << i_slot;
++    EXPECT_FALSE(r.metadata.is_empty) << "slot " << i_slot;
++    EXPECT_FALSE(r.metadata.tx_end.has_value()) << "slot " << i_slot;
++    timestamp += r.buffer->get_nof_samples();
++    r.buffer = nullptr;
++  }
++}

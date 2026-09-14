@@ -1,0 +1,332 @@
+From f6820689ff9f69bf2e61349ca78b306629e9bee7 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sun, 26 Jul 2026 12:13:07 -0500
+Subject: [PATCH 18/52] kaiair: LDP core, deadline -> retransmission budget ->
+ per-tx reliability (T-LDP.1)
+
+pktr_ldp.h: pure-math LDP composition. N(D) in-deadline transmission opportunities
+from (deadline, first-tx latency, HARQ retx cadence); required per-attempt
+reliability p_req = 1-(1-beta_pkt)^(1/N); ldp_effective_tx_beta() is the single
+composition point with the Cantelli loop, tight deadlines demand more power per
+attempt, loose deadlines let HARQ absorb failures (the power-vs-latency trade).
+
+Wired: env knobs KAIAIR_PKTR_DEADLINE_MS / PKT_BETA / TX0_MS / RETX_MS; the UL
+actuation cushion and the metrics view/JSON now use the LDP-effective beta, and
+the view prints a per-UE "PktR LDP" line (deadline, N, p_req, k vs static).
+
+7 unit tests (budget floor/clamp/never-zero, p_req monotonicity + anchor 0.9 at
+N=2, composition meets pkt target, cushion shrinks with looser deadline,
+disabled passthrough). All pass; gnb builds clean.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 27 +++++-
+ lib/scheduler/kaiair/pktr_ldp.h               | 90 ++++++++++++++++++
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 15 ++-
+ .../unittests/scheduler/kaiair/CMakeLists.txt |  4 +
+ .../scheduler/kaiair/pktr_ldp_test.cpp        | 94 +++++++++++++++++++
+ 5 files changed, 225 insertions(+), 5 deletions(-)
+ create mode 100644 lib/scheduler/kaiair/pktr_ldp.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 082aead160..e54b1cc5a8 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -81,7 +81,9 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+     const bool                  has_ni  = ue.pktr_nof_ni_samples > 0;
+     const unsigned              dl_tot  = ue.dl_nof_ok + ue.dl_nof_nok;
+     const unsigned              ul_tot  = ue.ul_nof_ok + ue.ul_nof_nok;
+-    const float                 cushion = ue.pktr_std_ni_db * kaiair::cantelli_sigma_factor(cfg.beta);
++    // Same LDP-composed per-tx beta as the console view / actuation path.
++    const float                 cushion =
++        ue.pktr_std_ni_db * kaiair::cantelli_sigma_factor(kaiair::ldp_effective_tx_beta(s.ldp, cfg.beta));
+ 
+     j += fmt::format(R"(,"rnti":"{:#06x}")", to_value(ue.rnti));
+     num("ul_sinr_db", has_snr, ue.pusch_snr_db);
+@@ -230,12 +232,29 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+       // power loop must drive the UL SINR to the deterministic margin gamma plus the Cantelli
+       // reliability cushion sigma*k(beta); the gap to the current SINR is the TPC command it would
+       // issue. E_max[I_R] is the interference headroom below the received signal level.
+-      const kaiair::pktr_config& cfg = kaiair::pktr_runtime().ipc; // gamma_db, beta, ewma_c (KAIAIR_PKTR_*)
++      const kaiair::pktr_settings& sall = kaiair::pktr_runtime();
++      const kaiair::pktr_config&   cfg  = sall.ipc; // gamma_db, beta, ewma_c (KAIAIR_PKTR_*)
+       const float gamma_live = kaiair::pktr_gamma_now(cfg.gamma_db); // live SINR-target margin (co-design GUI)
+-      const float k         = kaiair::cantelli_sigma_factor(cfg.beta);
+-      const float cushion   = ue.pktr_std_ni_db * k;           // sigma*k(beta)
++      // LDP composition: per-tx beta = p_req(N(deadline)) when a deadline is set, else the static beta.
++      const float eff_beta  = kaiair::ldp_effective_tx_beta(sall.ldp, cfg.beta);
++      const float k         = kaiair::cantelli_sigma_factor(eff_beta);
++      const float cushion   = ue.pktr_std_ni_db * k;           // sigma*k(eff_beta)
+       const float sinr_targ = gamma_live + cushion;            // required UL SINR for (gamma, beta)
+ 
++      if (sall.ldp.deadline_ms > 0.0F) {
++        const unsigned nof_tx = kaiair::ldp_tx_budget(sall.ldp);
++        fmt::print("    PktR LDP       : deadline={:.1f} ms -> {} in-deadline tx (first {:.1f} ms, retx {:.1f} ms); "
++                   "pkt-beta {:.3f} -> per-tx p_req {:.4f} (k={:.2f} vs static {:.2f})\n",
++                   sall.ldp.deadline_ms,
++                   nof_tx,
++                   sall.ldp.first_tx_ms,
++                   sall.ldp.retx_interval_ms,
++                   sall.ldp.pkt_beta,
++                   eff_beta,
++                   k,
++                   kaiair::cantelli_sigma_factor(cfg.beta));
++      }
++
+       if (ue.pktr_std_ni_db > kaiair::pktr_runtime().sigma_transient_db) {
+         // Mid regime-change: the EWMA variance is dominated by mean-lag, not steady-state jitter,
+         // so the Cantelli cushion is not valid. Flag it instead of printing an absurd power target.
+diff --git a/lib/scheduler/kaiair/pktr_ldp.h b/lib/scheduler/kaiair/pktr_ldp.h
+new file mode 100644
+index 0000000000..979b63c2c4
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_ldp.h
+@@ -0,0 +1,90 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, LDP (Latest-Deadline / retransmission-budget) core.
++//
++// PRK-family URLLC delivers a packet with reliability beta_pkt BEFORE its deadline D. A single
++// transmission attempt only needs reliability p if there is time for retries: with N in-deadline
++// transmission opportunities, P(delivered) = 1 - (1 - p)^N, so the REQUIRED per-attempt
++// reliability is
++//
++//   p_req(N) = 1 - (1 - beta_pkt)^(1/N).
++//
++// LDP therefore composes with the Cantelli power loop (pktr_ipc.h): the deadline and the HARQ
++// retransmission cadence fix N; N and beta_pkt fix p_req; p_req becomes the per-transmission beta
++// that sizes the Cantelli cushion sigma*k(p_req). Tight deadlines (small N) demand more power per
++// attempt; loose deadlines let HARQ absorb failures and save power/interference, the exact
++// power-vs-latency trade PktR is built to expose.
++//
++// This header is pure math (no scheduler state, no I/O), mirroring pktr_ipc.h. Times are in ms.
++
++#pragma once
++
++#include "pktr_ipc.h"
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Static configuration for the LDP retransmission-budget computation.
++struct ldp_config {
++  /// Packet delivery deadline D (ms). <= 0 disables LDP (fall back to the static per-tx beta).
++  float deadline_ms = 0.0F;
++  /// End-to-end per-packet delivery reliability target in (0, 1).
++  float pkt_beta = 0.99F;
++  /// Latency from packet arrival to the END of its first transmission attempt (ms):
++  /// scheduling/grant access delay on this TDD configuration.
++  float first_tx_ms = 5.0F;
++  /// Interval between successive HARQ (re)transmission opportunities (ms): NACK turnaround plus
++  /// the wait for the next UL slot of the TDD pattern.
++  float retx_interval_ms = 5.0F;
++};
++
++/// Number of transmission opportunities that fit before the deadline: the first attempt completes
++/// at first_tx_ms, each retry costs retx_interval_ms more. Always >= 1 (a packet gets at least one
++/// attempt even if the deadline is already tight) and clamped to a sane ceiling.
++inline unsigned ldp_tx_budget(const ldp_config& cfg)
++{
++  constexpr unsigned max_budget = 64; // beyond this the per-tx requirement is numerically flat
++  if (cfg.deadline_ms <= cfg.first_tx_ms) {
++    return 1;
++  }
++  const float retx = std::max(cfg.retx_interval_ms, 0.1F);
++  const float extra = (cfg.deadline_ms - cfg.first_tx_ms) / retx;
++  const unsigned n = 1U + static_cast<unsigned>(extra); // floor
++  return std::min(n, max_budget);
++}
++
++/// Required per-transmission success probability so that N in-deadline attempts meet the
++/// end-to-end packet reliability: p_req = 1 - (1 - beta_pkt)^(1/N).
++inline float ldp_required_tx_reliability(float pkt_beta, unsigned nof_tx)
++{
++  const float b = std::clamp(pkt_beta, 0.0F, 0.999999F);
++  const unsigned n = std::max(nof_tx, 1U);
++  return 1.0F - std::pow(1.0F - b, 1.0F / static_cast<float>(n));
++}
++
++/// Achieved end-to-end packet reliability for a given per-transmission reliability and budget:
++/// 1 - (1 - p)^N. Inverse of ldp_required_tx_reliability (up to clamping).
++inline float ldp_achieved_pkt_reliability(float tx_reliability, unsigned nof_tx)
++{
++  const float p = std::clamp(tx_reliability, 0.0F, 1.0F);
++  const unsigned n = std::max(nof_tx, 1U);
++  return 1.0F - std::pow(1.0F - p, static_cast<float>(n));
++}
++
++/// The effective per-transmission beta the Cantelli loop should target. With LDP enabled
++/// (deadline > 0) this is p_req(N(D)); otherwise the caller's static per-tx beta passes through.
++/// This is the single composition point between LDP and the IPC power loop.
++inline float ldp_effective_tx_beta(const ldp_config& cfg, float static_beta)
++{
++  if (cfg.deadline_ms <= 0.0F) {
++    return static_beta;
++  }
++  return ldp_required_tx_reliability(cfg.pkt_beta, ldp_tx_budget(cfg));
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index c248df0740..75239c709d 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -19,6 +19,7 @@
+ #pragma once
+ 
+ #include "pktr_ipc.h"
++#include "pktr_ldp.h" // LDP deadline -> retransmission budget -> per-tx reliability composition
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
+@@ -74,6 +75,10 @@ struct pktr_settings {
+   float grk_xcell_rx_db = NAN;
+   /// The bench interferer's activity factor E[alpha] in [0,1].
+   float grk_xcell_activity = 1.0F;
++  /// LDP deadline/retransmission-budget config (KAIAIR_PKTR_DEADLINE_MS et al.). When
++  /// ldp.deadline_ms > 0 the per-transmission Cantelli beta becomes the LDP-derived p_req
++  /// instead of ipc.beta, the deadline-aware composition (see pktr_ldp.h).
++  ldp_config ldp{};
+ };
+ 
+ namespace detail {
+@@ -117,6 +122,12 @@ inline pktr_settings load_pktr_settings()
+   s.grk_view           = env_flag("KAIAIR_PKTR_GRK");
+   s.grk_xcell_rx_db    = env_float("KAIAIR_PKTR_GRK_XRX_DB", NAN);
+   s.grk_xcell_activity = std::clamp(env_float("KAIAIR_PKTR_GRK_XACT", 1.0F), 0.0F, 1.0F);
++  // LDP: packet deadline (ms; 0 = off), end-to-end packet reliability, and the TDD/HARQ timing
++  // that fixes the in-deadline transmission budget (defaults ~ the P5 indoor bench cadence).
++  s.ldp.deadline_ms      = env_float("KAIAIR_PKTR_DEADLINE_MS", 0.0F);
++  s.ldp.pkt_beta         = std::clamp(env_float("KAIAIR_PKTR_PKT_BETA", s.ipc.beta), 0.0F, 0.999999F);
++  s.ldp.first_tx_ms      = std::max(0.1F, env_float("KAIAIR_PKTR_TX0_MS", 5.0F));
++  s.ldp.retx_interval_ms = std::max(0.1F, env_float("KAIAIR_PKTR_RETX_MS", 5.0F));
+   return s;
+ }
+ 
+@@ -271,7 +282,9 @@ inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls, const pktr_settin
+   if (not pktr_actuate_now(s.actuate) or not ls.has_samples() or ls.std_ni_db() > s.sigma_transient_db) {
+     return 0.0F;
+   }
+-  return ls.std_ni_db() * cantelli_sigma_factor(s.ipc.beta);
++  // LDP composition: with a deadline configured, the cushion targets the per-transmission
++  // reliability p_req(N(D)) needed to deliver the PACKET by its deadline via HARQ retries.
++  return ls.std_ni_db() * cantelli_sigma_factor(ldp_effective_tx_beta(s.ldp, s.ipc.beta));
+ }
+ 
+ /// Convenience overload using the process-wide settings.
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index 7ed22fb77f..74bd3a82cf 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -24,3 +24,7 @@ add_test(pktr_grk_test pktr_grk_test)
+ add_executable(pktr_signal_map_test pktr_signal_map_test.cpp)
+ target_link_libraries(pktr_signal_map_test ocudulog gtest gtest_main)
+ add_test(pktr_signal_map_test pktr_signal_map_test)
++
++add_executable(pktr_ldp_test pktr_ldp_test.cpp)
++target_link_libraries(pktr_ldp_test ocudulog gtest gtest_main)
++add_test(pktr_ldp_test pktr_ldp_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp b/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+new file mode 100644
+index 0000000000..4719e6fce6
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+@@ -0,0 +1,94 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_ldp.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++// N(D): first attempt at first_tx_ms, one more per retx_interval_ms, floor semantics.
++TEST(pktr_ldp_test, tx_budget_counts_in_deadline_attempts)
++{
++  ldp_config cfg;
++  cfg.first_tx_ms      = 5.0F;
++  cfg.retx_interval_ms = 5.0F;
++
++  cfg.deadline_ms = 5.0F; // exactly the first attempt
++  EXPECT_EQ(ldp_tx_budget(cfg), 1U);
++  cfg.deadline_ms = 9.9F; // first attempt + not-quite one retry
++  EXPECT_EQ(ldp_tx_budget(cfg), 1U);
++  cfg.deadline_ms = 10.0F; // first + 1 retry
++  EXPECT_EQ(ldp_tx_budget(cfg), 2U);
++  cfg.deadline_ms = 25.0F; // first + 4 retries
++  EXPECT_EQ(ldp_tx_budget(cfg), 5U);
++}
++
++// A deadline tighter than even the first attempt still yields one attempt (never zero).
++TEST(pktr_ldp_test, tx_budget_never_zero)
++{
++  ldp_config cfg;
++  cfg.deadline_ms      = 1.0F;
++  cfg.first_tx_ms      = 5.0F;
++  cfg.retx_interval_ms = 5.0F;
++  EXPECT_EQ(ldp_tx_budget(cfg), 1U);
++}
++
++// Budget is clamped to the numeric ceiling for absurdly loose deadlines.
++TEST(pktr_ldp_test, tx_budget_clamped)
++{
++  ldp_config cfg;
++  cfg.deadline_ms      = 1e9F;
++  cfg.first_tx_ms      = 5.0F;
++  cfg.retx_interval_ms = 5.0F;
++  EXPECT_EQ(ldp_tx_budget(cfg), 64U);
++}
++
++// p_req: N=1 degenerates to the packet target itself; more attempts relax the per-tx requirement.
++TEST(pktr_ldp_test, required_reliability_monotone_in_budget)
++{
++  const float beta_pkt = 0.99F;
++  const float p1       = ldp_required_tx_reliability(beta_pkt, 1);
++  const float p2       = ldp_required_tx_reliability(beta_pkt, 2);
++  const float p5       = ldp_required_tx_reliability(beta_pkt, 5);
++  EXPECT_NEAR(p1, beta_pkt, 1e-6F);
++  EXPECT_LT(p2, p1);
++  EXPECT_LT(p5, p2);
++  // Known anchor: 1-(1-0.99)^(1/2) = 0.9 exactly.
++  EXPECT_NEAR(p2, 0.9F, 1e-4F);
++}
++
++// Composition closes: using p_req for N attempts achieves at least beta_pkt.
++TEST(pktr_ldp_test, required_reliability_meets_packet_target)
++{
++  for (unsigned n : {1U, 2U, 3U, 5U, 10U, 64U}) {
++    const float p_req    = ldp_required_tx_reliability(0.999F, n);
++    const float achieved = ldp_achieved_pkt_reliability(p_req, n);
++    EXPECT_GE(achieved, 0.999F - 1e-4F) << "n=" << n;
++  }
++}
++
++// The Cantelli cushion shrinks as the deadline loosens: fewer dB needed per attempt when HARQ
++// can absorb failures, the power-vs-latency trade LDP exists to expose.
++TEST(pktr_ldp_test, cushion_shrinks_with_looser_deadline)
++{
++  ldp_config cfg;
++  cfg.pkt_beta         = 0.99F;
++  cfg.first_tx_ms      = 5.0F;
++  cfg.retx_interval_ms = 5.0F;
++
++  cfg.deadline_ms  = 5.0F; // N=1
++  const float k_tight = cantelli_sigma_factor(ldp_effective_tx_beta(cfg, 0.9F));
++  cfg.deadline_ms  = 25.0F; // N=5
++  const float k_loose = cantelli_sigma_factor(ldp_effective_tx_beta(cfg, 0.9F));
++  EXPECT_GT(k_tight, k_loose);
++  // N=1: per-tx beta = pkt beta 0.99 -> k = sqrt(0.99/0.01) ~ 9.95
++  EXPECT_NEAR(k_tight, 9.9499F, 1e-2F);
++}
++
++// Deadline disabled -> the static per-transmission beta passes through untouched.
++TEST(pktr_ldp_test, disabled_passthrough)
++{
++  ldp_config cfg; // deadline_ms = 0
++  EXPECT_NEAR(ldp_effective_tx_beta(cfg, 0.9F), 0.9F, 1e-6F);
++}

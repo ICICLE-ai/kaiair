@@ -1,0 +1,260 @@
+From 864347db7db7c45bbea4205cc5b0a6b1ced885d3 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 24 Jun 2026 11:33:36 -0500
+Subject: [PATCH 04/52] kaiair: add pktr_link_state, per-link EWMA interference
+ statistics (UL)
+
+Header-only per-link store for the receiver-side interference+noise NI = RSRP - SINR,
+derived from per-packet UL measurements. Maintains an EWMA mean (PktR's I_R) and variance
+(the interference part of the Cantelli sigma term), with configurable filter memory c
+(default 15/16, per PRKS/PktR). Channel-side stats and the SINR beta-quantile come later.
+
+Standalone + unit-tested (7/7): NI derivation, exact mean on constant streams, step-change
+convergence, variance behavior, filter agility vs memory, reset. Not yet wired into the
+scheduler (next step). First Phase-1 code.
+---
+ lib/scheduler/kaiair/pktr_link_state.h        |  95 ++++++++++++++++
+ tests/unittests/scheduler/CMakeLists.txt      |   1 +
+ .../unittests/scheduler/kaiair/CMakeLists.txt |   6 +
+ .../scheduler/kaiair/pktr_link_state_test.cpp | 105 ++++++++++++++++++
+ 4 files changed, 207 insertions(+)
+ create mode 100644 lib/scheduler/kaiair/pktr_link_state.h
+ create mode 100644 tests/unittests/scheduler/kaiair/CMakeLists.txt
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp
+
+diff --git a/lib/scheduler/kaiair/pktr_link_state.h b/lib/scheduler/kaiair/pktr_link_state.h
+new file mode 100644
+index 0000000000..53c4bb4b7c
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_link_state.h
+@@ -0,0 +1,95 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, per-link running statistics of the receiver-side interference, derived from
++// per-packet uplink measurements. This is the interference-side state that PktR's power control
++// (the Cantelli transmit-power target) and K-adaptation consume.
++//
++// For a link with receiver R, each measured uplink packet yields a received signal power (RSRP)
++// and an SINR; the receiver-side interference-plus-noise is NI = RSRP - SINR (dB). We maintain an
++// exponentially-weighted moving mean and variance of NI:
++//
++//   mean(t) = c*mean(t-1) + (1-c)*NI(t)
++//   var(t)  = (1-alpha)*( var(t-1) + alpha*(NI(t) - mean(t-1))^2 ),   alpha = 1-c
++//
++// (Finch, "Incremental calculation of weighted mean and variance".) The weight c in [0,1) is the
++// memory of the filter: c -> 1 is stable/slow, c -> 0 is agile. The PRKS/PktR work uses c = 15/16.
++// This mirrors the EWMA interference filter in the PktR papers (I_R(t+1) = c*I_R(t) + (1-c)*I_R(t+1)).
++//
++// Scope: one instance per link (per UE, per direction). Channel-side statistics (predicted gain
++// G-hat and Var[G]) and the beta-quantile of SINR are added in later increments; this class
++// currently tracks the interference side only.
++
++#pragma once
++
++#include <cmath>
++#include <cstdint>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Running interference statistics for one PktR link, fed from per-packet UL measurements.
++class pktr_link_state
++{
++public:
++  /// Default EWMA old-sample weight c (filter memory). 15/16 follows PRKS/PktR.
++  static constexpr float default_ewma_c = 15.0F / 16.0F;
++
++  explicit pktr_link_state(float ewma_c = default_ewma_c) : c(ewma_c) {}
++
++  /// Feed one per-packet UL measurement: the SINR and the received signal power (RSRP), both in dB.
++  /// Updates the running mean and variance of the receiver interference-plus-noise NI = RSRP - SINR.
++  void push_ul_measurement(float sinr_db, float rsrp_db)
++  {
++    const float ni    = rsrp_db - sinr_db; // receiver-side interference + noise (dB)
++    const float alpha = 1.0F - c;          // new-sample weight
++    if (nof_samples_ == 0) {
++      mean_ni_db_ = ni;
++      var_ni_     = 0.0F;
++    } else {
++      const float delta = ni - mean_ni_db_;
++      mean_ni_db_ += alpha * delta;
++      var_ni_ = (1.0F - alpha) * (var_ni_ + alpha * delta * delta);
++    }
++    latest_ni_db_ = ni;
++    ++nof_samples_;
++  }
++
++  /// Whether at least one measurement has been fed.
++  bool has_samples() const { return nof_samples_ > 0; }
++
++  /// Number of measurements fed so far.
++  uint64_t nof_samples() const { return nof_samples_; }
++
++  /// Most recent raw NI sample (dB).
++  float latest_ni_db() const { return latest_ni_db_; }
++
++  /// EWMA mean interference-plus-noise (dB), PktR's I_R.
++  float mean_ni_db() const { return mean_ni_db_; }
++
++  /// EWMA variance of the interference-plus-noise (dB^2), feeds the interference part of the
++  /// Cantelli sigma term, sigma = sqrt(Var[G] + Var[NI]).
++  float var_ni() const { return var_ni_; }
++
++  /// EWMA standard deviation of the interference-plus-noise (dB).
++  float std_ni_db() const { return std::sqrt(var_ni_ > 0.0F ? var_ni_ : 0.0F); }
++
++  /// Clear all accumulated statistics.
++  void reset()
++  {
++    nof_samples_  = 0;
++    mean_ni_db_   = 0.0F;
++    var_ni_       = 0.0F;
++    latest_ni_db_ = 0.0F;
++  }
++
++private:
++  float    c;                  // EWMA old-sample weight (filter memory)
++  uint64_t nof_samples_ = 0;
++  float    mean_ni_db_   = 0.0F;
++  float    var_ni_       = 0.0F;
++  float    latest_ni_db_ = 0.0F;
++};
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/tests/unittests/scheduler/CMakeLists.txt b/tests/unittests/scheduler/CMakeLists.txt
+index ffdd86d5a3..0cafe4eb5c 100644
+--- a/tests/unittests/scheduler/CMakeLists.txt
++++ b/tests/unittests/scheduler/CMakeLists.txt
+@@ -17,6 +17,7 @@ add_subdirectory(policy)
+ add_subdirectory(config)
+ add_subdirectory(slicing)
+ add_subdirectory(srs_scheduling)
++add_subdirectory(kaiair)
+ 
+ add_executable(pdcch_resource_allocator_test pdcch/pdcch_resource_allocator_test.cpp)
+ target_link_libraries(pdcch_resource_allocator_test
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+new file mode 100644
+index 0000000000..fff474846b
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -0,0 +1,6 @@
++# SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++# SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++add_executable(pktr_link_state_test pktr_link_state_test.cpp)
++target_link_libraries(pktr_link_state_test ocudulog gtest gtest_main)
++add_test(pktr_link_state_test pktr_link_state_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp b/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp
+new file mode 100644
+index 0000000000..9a49a260d5
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp
+@@ -0,0 +1,105 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_link_state.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++// A fresh link reports no samples and is in a clean state.
++TEST(pktr_link_state_test, empty_on_construction)
++{
++  pktr_link_state ls;
++  EXPECT_FALSE(ls.has_samples());
++  EXPECT_EQ(ls.nof_samples(), 0U);
++}
++
++// NI is derived as RSRP - SINR; the first sample sets the mean exactly with zero variance.
++TEST(pktr_link_state_test, first_sample_sets_mean_to_ni_with_zero_variance)
++{
++  pktr_link_state ls;
++  ls.push_ul_measurement(/*sinr_db=*/-2.0F, /*rsrp_db=*/-6.0F);
++  EXPECT_TRUE(ls.has_samples());
++  EXPECT_EQ(ls.nof_samples(), 1U);
++  EXPECT_FLOAT_EQ(ls.latest_ni_db(), -4.0F); // -6 - (-2) = -4
++  EXPECT_FLOAT_EQ(ls.mean_ni_db(), -4.0F);
++  EXPECT_FLOAT_EQ(ls.var_ni(), 0.0F);
++}
++
++// A constant NI stream keeps the mean exact and the variance at zero.
++TEST(pktr_link_state_test, constant_stream_keeps_mean_exact_and_zero_variance)
++{
++  pktr_link_state ls;
++  for (int i = 0; i < 200; ++i) {
++    ls.push_ul_measurement(/*sinr_db=*/0.0F, /*rsrp_db=*/-3.0F); // NI = -3 every time
++  }
++  EXPECT_NEAR(ls.mean_ni_db(), -3.0F, 1e-4F);
++  EXPECT_NEAR(ls.var_ni(), 0.0F, 1e-4F);
++  EXPECT_NEAR(ls.std_ni_db(), 0.0F, 1e-4F);
++}
++
++// After a step change in NI, the EWMA mean converges toward the new level.
++TEST(pktr_link_state_test, mean_converges_after_step_change)
++{
++  pktr_link_state ls; // default c = 15/16
++  // Warm up at NI = 0.
++  for (int i = 0; i < 100; ++i) {
++    ls.push_ul_measurement(0.0F, 0.0F); // NI = 0
++  }
++  EXPECT_NEAR(ls.mean_ni_db(), 0.0F, 1e-3F);
++  // Step to NI = 10 and let it settle.
++  for (int i = 0; i < 300; ++i) {
++    ls.push_ul_measurement(0.0F, 10.0F); // NI = 10
++  }
++  EXPECT_NEAR(ls.mean_ni_db(), 10.0F, 0.1F);
++}
++
++// A varying NI stream produces a positive variance; a constant one does not.
++TEST(pktr_link_state_test, variance_positive_for_varying_stream)
++{
++  pktr_link_state ls;
++  // Alternate NI around 0 by +/- 2 dB.
++  for (int i = 0; i < 500; ++i) {
++    const float rsrp = (i % 2 == 0) ? 2.0F : -2.0F;
++    ls.push_ul_measurement(/*sinr_db=*/0.0F, /*rsrp_db=*/rsrp); // NI = +/-2
++  }
++  EXPECT_NEAR(ls.mean_ni_db(), 0.0F, 0.5F);
++  EXPECT_GT(ls.var_ni(), 1.0F);  // spread of +/-2 -> variance on the order of a few dB^2
++  EXPECT_GT(ls.std_ni_db(), 0.5F);
++}
++
++// A more agile filter (smaller c) tracks a step faster than a stable one (larger c).
++// Both must first be warmed up to a common level, since the first sample initializes the mean
++// directly regardless of c.
++TEST(pktr_link_state_test, agile_filter_tracks_faster_than_stable)
++{
++  pktr_link_state agile(/*ewma_c=*/0.5F);
++  pktr_link_state stable(/*ewma_c=*/0.99F);
++  // Warm up both at NI = 0.
++  for (int i = 0; i < 50; ++i) {
++    agile.push_ul_measurement(0.0F, 0.0F);
++    stable.push_ul_measurement(0.0F, 0.0F);
++  }
++  ASSERT_NEAR(agile.mean_ni_db(), 0.0F, 1e-3F);
++  ASSERT_NEAR(stable.mean_ni_db(), 0.0F, 1e-3F);
++  // Step to NI = 10 for a few samples and compare how far each has moved.
++  for (int i = 0; i < 5; ++i) {
++    agile.push_ul_measurement(0.0F, 10.0F);  // NI = 10
++    stable.push_ul_measurement(0.0F, 10.0F); // NI = 10
++  }
++  EXPECT_GT(agile.mean_ni_db(), stable.mean_ni_db());
++  EXPECT_GT(agile.mean_ni_db(), 5.0F);   // agile has moved well toward 10
++  EXPECT_LT(stable.mean_ni_db(), 5.0F);  // stable has barely moved
++}
++
++// reset() clears all state.
++TEST(pktr_link_state_test, reset_clears_state)
++{
++  pktr_link_state ls;
++  ls.push_ul_measurement(5.0F, 1.0F);
++  ASSERT_TRUE(ls.has_samples());
++  ls.reset();
++  EXPECT_FALSE(ls.has_samples());
++  EXPECT_EQ(ls.nof_samples(), 0U);
++}

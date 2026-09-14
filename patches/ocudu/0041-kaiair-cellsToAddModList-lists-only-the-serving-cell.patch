@@ -1,0 +1,38 @@
+From dca2d5fdc0ba084d6bd3aaed44c569b1d66d924a Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 15:09:22 -0500
+Subject: [PATCH 41/52] kaiair: cellsToAddModList lists only the serving cell's
+ configured ncells
+
+---
+ lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+index a5066905fa..56e097d766 100644
+--- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
++++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+@@ -3,6 +3,7 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "cell_meas_manager_impl.h"
++#include <algorithm>
+ #include "ocudu/kaiair/pktr_neighbor_store.h" // KaiAir/PktR: multi-cell signal-map feed
+ #include "cell_meas_manager_helpers.h"
+ #include "ocudu/cu_cp/cell_meas_manager_config.h"
+@@ -107,9 +108,13 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_
+         rrc_cells_to_add_mod cell_to_add;
+         cell_to_add.pci = ncell_cfg.serving_cell_cfg.pci.value();
+         meas_obj_to_add.meas_obj_nr->cells_to_add_mod_list.push_back(cell_to_add);
+-      } else if (nci != serving_nci) {
++      } else if (nci != serving_nci &&
++                 std::any_of(cell_config.ncells.begin(), cell_config.ncells.end(), [&](const auto& nc) {
++                   return nc.nci == nci;
++                 })) {
+         // KaiAir/PktR multi-cell: list neighbor PCIs explicitly (38.331 cellsToAddModList) for regular
+-        // measurement configs too. 3GPP UEs auto-detect co-frequency neighbors, but the OAI nrUE only
++        // measurement configs too, only the serving cell's configured ncells (the OAI nrUE keeps just
++        // ONE neighbor, so the list must not include off-air cells). 3GPP UEs auto-detect co-frequency neighbors, but the OAI nrUE only
+         // measures PCIs named in cellsToAddModList (rrc_UE.c), without this it never sends the A3
+         // reports that feed the neighbor store (cross-cell gains for the exclusion region).
+         const auto& ncell_cfg = cfg.cells.at(nci);

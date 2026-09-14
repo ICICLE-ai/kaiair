@@ -1,0 +1,110 @@
+From b7eb28aa8dda01f2d82507b224499ba8822b4530 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 22 Jun 2026 12:45:34 -0500
+Subject: [PATCH 01/12] ARA environment adaptations: AraSDR/AraRACH
+ terrestrial/UE support
+
+Faithful capture of the uncommitted working-tree changes on the ARA UE
+container (kaiair-ue-1) atop upstream OAI develop @ f3589d97. Adapts the
+OAI nrUE for the ARA terrestrial USRP B210 deployment:
+  - ue.conf: terrestrial PDU session (DNN internet, nssai_sd) and disable
+    the LEO-satellite channel model / UE position
+  - nr_ue_procedures.c: DL TB stats accumulation + fall back to 1 PDSCH
+    MIMO layer when UE capability is unsignalled (avoids AssertFatal crash)
+  - NR_IF_Module.c: DL stats display
+
+Captured by KaiAir; original work by the AraSDR/AraRACH effort.
+
+Co-authored-by: AraSDR/AraRACH <arawireless@iastate.edu>
+---
+ openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c | 18 +++++++++++++++++-
+ openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c  | 11 ++++++++++-
+ targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf | 14 +++++++-------
+ 3 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
+index 608a5ccb87..72952ea362 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
+@@ -1382,6 +1382,17 @@ static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
+                     cw_idx)) {
+       if (current_harq->round < sizeofArray(mac->stats.dl.rounds))
+         mac->stats.dl.rounds[current_harq->round]++;
++      // accumulate DL TB stats (MCS/code-rate/modulation), mirroring the UL path
++      const fapi_nr_dl_cw_info_t *cwi = &dlsch_pdu->cw_info[0];
++      if (cwi->qamModOrder > 0) {
++        const uint32_t bits = cwi->TBS;
++        mac->stats.dl.total_bits += bits;
++        mac->stats.dl.target_code_rate += (uint64_t)cwi->targetCodeRate * bits;
++        mac->stats.dl.total_symbols += bits / cwi->qamModOrder;
++        mac->stats.dl.qam_mod_order += cwi->qamModOrder;
++        mac->stats.dl.rb_size += number_rbs;
++        mac->stats.dl.nr_of_symbols += dlsch_pdu->number_symbols;
++      }
+       // set the harq status at MAC for feedback
+       set_harq_status(mac,
+                       dci->pucch_resource_indicator,
+@@ -1459,7 +1470,12 @@ static int nr_ue_process_dci_dl_11(NR_UE_MAC_INST_t *mac,
+     max_mimo_layers = *sc_info->maxMIMO_Layers_PDSCH;
+   else
+     max_mimo_layers = mac->uecap_maxMIMO_PDSCH_layers;
+-  AssertFatal(max_mimo_layers > 0, "Invalid number of max MIMO layers for PDSCH\n");
++  // PDSCH-ServingCellConfig->maxMIMO-Layers is optional, and the UE capability
++  // (maxNumberMIMO-LayersPDSCH) may not be signalled (e.g. when no UE
++  // capability file is provided). In that case fall back to the minimum a UE
++  // must support (1 layer), as is done for PUSCH in nr_ue_scheduler.c.
++  if (max_mimo_layers <= 0)
++    max_mimo_layers = 1;
+   int nl_tbslbrm = max_mimo_layers < 4 ? max_mimo_layers : 4;
+   dlsch_pdu->tbslbrm = nr_compute_tbslbrm(dlsch_pdu->mcs_table, sc_info->dl_bw_tbslbrm, nl_tbslbrm);
+   /*PTRS configuration */
+diff --git a/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c b/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c
+index 9c29d1584c..9be390961d 100644
+--- a/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c
++++ b/openair2/NR_UE_PHY_INTERFACE/NR_IF_Module.c
+@@ -54,10 +54,19 @@ void print_ue_mac_stats(const module_id_t mod, const int frame_rx, const int slo
+   cur += snprintf(cur, end - cur, "    DL harq: %lu", mac->stats.dl.rounds[0]);
+   int nb;
+   for (nb = NR_MAX_HARQ_ROUNDS_FOR_STATS - 1; nb > 1; nb--)
+-    if (mac->stats.ul.rounds[nb])
++    if (mac->stats.dl.rounds[nb])
+       break;
+   for (int i = 1; i < nb + 1; i++)
+     cur += snprintf(cur, end - cur, "/%lu", mac->stats.dl.rounds[i]);
++  if (mac->stats.dl.total_bits > 0 && mac->stats.dl.total_symbols > 0)
++    cur += snprintf(cur,
++                    end - cur,
++                    " avg code rate %.01f, avg bit/symbol %.01f, avg per TB: "
++                    "(nb RBs %.01f, nb symbols %.01f)",
++                    (double)mac->stats.dl.target_code_rate / (mac->stats.dl.total_bits * 1024 * 10), // See const Table_51311 definition
++                    (double)mac->stats.dl.total_bits / mac->stats.dl.total_symbols,
++                    mac->stats.dl.rb_size / nbdl,
++                    mac->stats.dl.nr_of_symbols / nbdl);
+ 
+   cur += snprintf(cur, end - cur, "\n    UL harq: %lu", mac->stats.ul.rounds[0]);
+   for (nb = NR_MAX_HARQ_ROUNDS_FOR_STATS - 1; nb > 1; nb--)
+diff --git a/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf b/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf
+index 2c56286e5f..60f4f07067 100644
+--- a/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf
++++ b/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.conf
+@@ -4,13 +4,13 @@ uicc0 = {
+ imsi = "2089900007487";
+ key = "fec86ba6eb707ed08905757b1bb44b8f";
+ opc= "C42449363BBAD02B66D16BC975D77CC1";
+-pdu_sessions = ({ dnn = "oai"; nssai_sst = 1; });
++pdu_sessions = ({ dnn = "internet"; nssai_sst = 1; nssai_sd = 1; });
+ }
+ 
+-position0 = {
+-    x = 0.0;
+-    y = 0.0;
+-    z = 6377900.0;
+-}
++#position0 = {
++#    x = 0.0;
++#    y = 0.0;
++#    z = 6377900.0;
++#}
+ 
+-@include "channelmod_rfsimu_LEO_satellite.conf"
++#@include "channelmod_rfsimu_LEO_satellite.conf"

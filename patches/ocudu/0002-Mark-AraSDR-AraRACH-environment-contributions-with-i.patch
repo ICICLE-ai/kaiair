@@ -1,0 +1,327 @@
+From dcb940cb96d59ec29f22eb922d8f2d35a0f80b9d Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 22 Jun 2026 12:50:23 -0500
+Subject: [PATCH 02/52] Mark AraSDR/AraRACH environment contributions with
+ inline comments
+
+Wrap each AraSDR/AraRACH RF/TDD adaptation region with
+'// >>> AraSDR/AraRACH contribution (begin/end)' markers so the provenance
+of the env-baseline changes is visible in-tree (complementing the prior
+faithful-capture commit and the tracking file in the kaiair repo). Comments
+only, no functional change.
+---
+ .../split_8/helpers/ru_sdr_config_translator.cpp     |  6 ++++++
+ include/ocudu/phy/lower/lower_phy_configuration.h    |  4 ++++
+ .../downlink/downlink_processor_factories.h          |  4 ++++
+ lib/phy/lower/lower_phy_factory.cpp                  |  2 ++
+ lib/phy/lower/processors/downlink/CMakeLists.txt     |  4 +++-
+ .../downlink/downlink_processor_baseband_impl.cpp    | 12 ++++++++++++
+ .../downlink/downlink_processor_baseband_impl.h      |  6 ++++++
+ .../downlink/downlink_processor_factories.cpp        |  2 ++
+ lib/radio/uhd/radio_uhd_device.h                     |  2 ++
+ lib/radio/uhd/radio_uhd_tx_stream.cpp                |  2 ++
+ tests/unittests/phy/lower/lower_phy_test.cpp         |  2 ++
+ .../downlink/lower_phy_downlink_processor_test.cpp   |  2 ++
+ 12 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp b/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp
+index ad8a22e2f8..fe0d787839 100644
+--- a/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp
++++ b/apps/units/flexible_o_du/split_8/helpers/ru_sdr_config_translator.cpp
+@@ -6,7 +6,9 @@
+ #include "apps/services/worker_manager/worker_manager_config.h"
+ #include "ru_sdr_config.h"
+ #include "ocudu/ran/band_helper.h"
++// >>> AraSDR/AraRACH contribution (begin)
+ #include <algorithm>
++// <<< AraSDR/AraRACH contribution (end)
+ 
+ using namespace ocudu;
+ 
+@@ -32,7 +34,9 @@ static lower_phy_configuration generate_lower_phy_config(const flexible_o_du_ru_
+   out_cfg.ul_freq_hz                 = band_helper::nr_arfcn_to_freq(config.ul_arfcn);
+   out_cfg.nof_tx_ports               = config.nof_tx_antennas;
+   out_cfg.nof_rx_ports               = config.nof_rx_antennas;
++// >>> AraSDR/AraRACH contribution (begin)
+   out_cfg.tdd_config                 = config.tdd_config;
++// <<< AraSDR/AraRACH contribution (end)
+   out_cfg.dft_window_offset          = 0.5F;
+   out_cfg.max_processing_delay_slots = max_processing_delay_slot;
+   out_cfg.srate                      = sampling_rate::from_MHz(ru_cfg.srate_MHz);
+@@ -142,6 +146,7 @@ static void generate_radio_config(radio_configuration::radio&
+   out_cfg.tx_mode          = radio_configuration::to_transmission_mode(ru_cfg.expert_cfg.transmission_mode);
+   out_cfg.power_ramping_us = ru_cfg.expert_cfg.power_ramping_time_us;
+ 
++// >>> AraSDR/AraRACH contribution (begin)
+   // For TDD cells, the lower PHY emits is_empty / tx_end metadata to gate the radio on the TDD pattern; that gating
+   // is only honored when the UHD TX stream runs in discontinuous mode. If the user left the default ("continuous") and
+   // any cell is TDD, promote to discontinuous so the front-end PA is actually keyed in sync with DL bursts.
+@@ -154,6 +159,7 @@ static void generate_radio_config(radio_configuration::radio&
+     out_cfg.tx_mode = radio_configuration::transmission_mode::discontinuous;
+   }
+ 
++// <<< AraSDR/AraRACH contribution (end)
+   std::vector<std::string> zmq_tx_addr = extract_zmq_ports(ru_cfg.device_arguments, "tx_port");
+   std::vector<std::string> zmq_rx_addr = extract_zmq_ports(ru_cfg.device_arguments, "rx_port");
+ 
+diff --git a/include/ocudu/phy/lower/lower_phy_configuration.h b/include/ocudu/phy/lower/lower_phy_configuration.h
+index 32301c9959..69386f36dc 100644
+--- a/include/ocudu/phy/lower/lower_phy_configuration.h
++++ b/include/ocudu/phy/lower/lower_phy_configuration.h
+@@ -17,7 +17,9 @@
+ #include "ocudu/ran/cyclic_prefix.h"
+ #include "ocudu/ran/n_ta_offset.h"
+ #include "ocudu/ran/subcarrier_spacing.h"
++// >>> AraSDR/AraRACH contribution (begin)
+ #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
++// <<< AraSDR/AraRACH contribution (end)
+ #include "ocudu/support/executors/task_executor.h"
+ 
+ namespace ocudu {
+@@ -57,9 +59,11 @@ struct lower_phy_configuration {
+   unsigned nof_tx_ports;
+   /// Number of receive ports.
+   unsigned nof_rx_ports;
++// >>> AraSDR/AraRACH contribution (begin)
+   /// \brief TDD UL/DL configuration. If set, the lower PHY uses it to gate the downlink burst on TDD boundaries via
+   /// the transmitter metadata (\c is_empty / \c tx_end). Leave unset for FDD.
+   std::optional<tdd_ul_dl_config_common> tdd_config;
++// <<< AraSDR/AraRACH contribution (end)
+   /// Shifts the DFT window by a fraction of the cyclic prefix [0, 1).
+   float dft_window_offset;
+   /// \brief Number of slots the timing handler is notified in advance of the transmission time.
+diff --git a/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h b/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h
+index bd57d2ce73..1ed3b48895 100644
+--- a/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h
++++ b/include/ocudu/phy/lower/processors/downlink/downlink_processor_factories.h
+@@ -7,7 +7,9 @@
+ #include "ocudu/phy/lower/processors/downlink/downlink_processor.h"
+ #include "ocudu/phy/lower/processors/downlink/pdxch/pdxch_processor_factories.h"
+ #include "ocudu/phy/lower/sampling_rate.h"
++// >>> AraSDR/AraRACH contribution (begin)
+ #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
++// <<< AraSDR/AraRACH contribution (end)
+ #include <memory>
+ 
+ namespace ocudu {
+@@ -30,8 +32,10 @@ struct downlink_processor_configuration {
+   unsigned nof_tx_ports;
+   /// Number of slots notified in advance in the TTI boundary event.
+   unsigned nof_slot_tti_in_advance;
++// >>> AraSDR/AraRACH contribution (begin)
+   /// TDD UL/DL configuration. If set, the downlink processor masks non-DL symbols via the transmitter metadata.
+   std::optional<tdd_ul_dl_config_common> tdd_config;
++// <<< AraSDR/AraRACH contribution (end)
+ };
+ 
+ /// Lower physical layer downlink processor - Factory interface.
+diff --git a/lib/phy/lower/lower_phy_factory.cpp b/lib/phy/lower/lower_phy_factory.cpp
+index 3a2ad819f4..6e5489b17a 100644
+--- a/lib/phy/lower/lower_phy_factory.cpp
++++ b/lib/phy/lower/lower_phy_factory.cpp
+@@ -107,8 +107,10 @@ public:
+                                                        .bandwidth_prb           = config.bandwidth_rb,
+                                                        .center_frequency_Hz     = config.dl_freq_hz,
+                                                        .nof_tx_ports            = config.nof_tx_ports,
++// >>> AraSDR/AraRACH contribution (begin)
+                                                        .nof_slot_tti_in_advance = config.max_processing_delay_slots,
+                                                        .tdd_config              = config.tdd_config};
++// <<< AraSDR/AraRACH contribution (end)
+ 
+     // Create downlink processor.
+     std::unique_ptr<lower_phy_downlink_processor> dl_proc =
+diff --git a/lib/phy/lower/processors/downlink/CMakeLists.txt b/lib/phy/lower/processors/downlink/CMakeLists.txt
+index 6b0dbd0b2e..0fa0d0f307 100644
+--- a/lib/phy/lower/processors/downlink/CMakeLists.txt
++++ b/lib/phy/lower/processors/downlink/CMakeLists.txt
+@@ -10,4 +10,6 @@ add_library(ocudu_lower_phy_downlink_processor STATIC
+         downlink_processor_factories.cpp
+         downlink_processor_impl.cpp)
+ 
+-target_link_libraries(ocudu_lower_phy_downlink_processor ocuduvec ocudu_instrumentation ocudu_ran)
+\ No newline at end of file
++# >>> AraSDR/AraRACH contribution (begin)
++target_link_libraries(ocudu_lower_phy_downlink_processor ocuduvec ocudu_instrumentation ocudu_ran)
++# <<< AraSDR/AraRACH contribution (end)
+diff --git a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp
+index f3171fe104..97a6deaea6 100644
+--- a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp
++++ b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.cpp
+@@ -23,8 +23,10 @@ downlink_processor_baseband_impl::downlink_processor_baseband_impl(
+   sector_id(config.sector_id),
+   rate(config.rate),
+   scs(config.scs),
++// >>> AraSDR/AraRACH contribution (begin)
+   cp(config.cp),
+   tdd_config(config.tdd_config),
++// <<< AraSDR/AraRACH contribution (end)
+   nof_samples_per_subframe(config.rate.to_kHz()),
+   nof_slots_per_subframe(get_nof_slots_per_subframe(config.scs)),
+   nof_symbols_per_slot(get_nsymb_per_slot(config.cp)),
+@@ -164,13 +166,17 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
+     notifier->on_new_metrics(pdxch_baseband_result.metrics);
+   }
+ 
++// >>> AraSDR/AraRACH contribution (begin)
+   processing_result result;
+ 
++// <<< AraSDR/AraRACH contribution (end)
+   // Align with the next slot using a different baseband buffer if the next sample is not aligned with the beginning of
+   // a slot or no PDxCH baseband is available to transmit.
+   if ((i_sample_slot != 0) || !pdxch_baseband_result.buffer) {
+     // Prepare result metadata and obtain baseband buffer from the pool.
++// >>> AraSDR/AraRACH contribution (begin)
+     result = {.metadata = {.ts = timestamp, .is_empty = true}, .buffer = buffer_pool.get()};
++// <<< AraSDR/AraRACH contribution (end)
+     report_fatal_error_if_not(result.buffer, "Failed to retrieve a baseband buffer.");
+ 
+     // Calculate the number of samples to the next slot.
+@@ -187,6 +193,7 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
+       fill_zeros(result.buffer->get_writer(), result.metadata);
+       result.metadata.is_empty = true;
+     }
++// >>> AraSDR/AraRACH contribution (begin)
+   } else {
+     // Prepare result metadata.
+     result = {.metadata = {.ts = timestamp, .is_empty = false}, .buffer = std::move(pdxch_baseband_result.buffer)};
+@@ -196,7 +203,9 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
+   // for partial DL slots we set tx_end so the radio cuts the burst at the last active DL symbol.
+   if (tdd_config && !result.metadata.is_empty) {
+     const ofdm_symbol_range active_dl_symbols = get_active_tdd_dl_symbols(*tdd_config, i_slot, cp);
++// <<< AraSDR/AraRACH contribution (end)
+ 
++// >>> AraSDR/AraRACH contribution (begin)
+     if (active_dl_symbols.length() == 0) {
+       // Slot has no active DL symbols (UL or special slot), drop the burst.
+       result.metadata.is_empty = true;
+@@ -216,9 +225,12 @@ downlink_processor_baseband_impl::process(baseband_gateway_timestamp timestamp)
+         }
+       }
+     }
++// <<< AraSDR/AraRACH contribution (end)
+   }
+ 
++// >>> AraSDR/AraRACH contribution (begin)
+   return result;
++// <<< AraSDR/AraRACH contribution (end)
+ }
+ 
+ void downlink_processor_baseband_impl::set_tx_time_offset(phy_time_unit tx_time_offset_)
+diff --git a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h
+index 20f115f285..e127b0beeb 100644
+--- a/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h
++++ b/lib/phy/lower/processors/downlink/downlink_processor_baseband_impl.h
+@@ -18,7 +18,9 @@
+ #include "ocudu/phy/lower/sampling_rate.h"
+ #include "ocudu/ran/cyclic_prefix.h"
+ #include "ocudu/ran/slot_point_extended.h"
++// >>> AraSDR/AraRACH contribution (begin)
+ #include "ocudu/ran/tdd/tdd_ul_dl_config.h"
++// <<< AraSDR/AraRACH contribution (end)
+ #include "ocudu/support/math/stats.h"
+ 
+ namespace ocudu {
+@@ -37,8 +39,10 @@ struct downlink_processor_baseband_configuration {
+   unsigned nof_tx_ports;
+   /// Number of slots notified in advance in the TTI boundary event.
+   unsigned nof_slot_tti_in_advance;
++// >>> AraSDR/AraRACH contribution (begin)
+   /// TDD UL/DL configuration. If set, the processor masks non-DL symbols via the transmitter metadata.
+   std::optional<tdd_ul_dl_config_common> tdd_config;
++// <<< AraSDR/AraRACH contribution (end)
+ };
+ 
+ namespace detail {
+@@ -211,10 +215,12 @@ private:
+   sampling_rate rate;
+   /// Subcarrier spacing.
+   subcarrier_spacing scs;
++// >>> AraSDR/AraRACH contribution (begin)
+   /// Cyclic prefix configuration. Needed for TDD symbol-range calculations.
+   cyclic_prefix cp;
+   /// TDD UL/DL configuration. Empty for FDD.
+   std::optional<tdd_ul_dl_config_common> tdd_config;
++// <<< AraSDR/AraRACH contribution (end)
+   /// Number of samples per subframe.
+   unsigned nof_samples_per_subframe;
+   /// Number of slots per subframe.
+diff --git a/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp b/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp
+index f8f8b66c10..9ab86b1295 100644
+--- a/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp
++++ b/lib/phy/lower/processors/downlink/downlink_processor_factories.cpp
+@@ -35,8 +35,10 @@ public:
+                                                                  .rate         = config.rate,
+                                                                  .nof_tx_ports = config.nof_tx_ports,
+                                                                  .nof_slot_tti_in_advance =
++// >>> AraSDR/AraRACH contribution (begin)
+                                                                      config.nof_slot_tti_in_advance,
+                                                                  .tdd_config = config.tdd_config};
++// <<< AraSDR/AraRACH contribution (end)
+ 
+     return std::make_unique<downlink_processor_impl>(pdxch_proc_factory->create(pdxch_proc_config, modulation_executor),
+                                                      baseband_config);
+diff --git a/lib/radio/uhd/radio_uhd_device.h b/lib/radio/uhd/radio_uhd_device.h
+index c33f7442af..f4ae345660 100644
+--- a/lib/radio/uhd/radio_uhd_device.h
++++ b/lib/radio/uhd/radio_uhd_device.h
+@@ -138,6 +138,7 @@ public:
+ 
+     fmt::print("Making USRP object with args '{}'\n", device_addr.to_string());
+ 
++// >>> AraSDR/AraRACH contribution (begin)
+     return safe_execution([this, &device_addr]() {
+       usrp = uhd::usrp::multi_usrp::make(device_addr);
+       // Configure the FP0 GPIO bank for TDD RF front-end control on USRP types that expose it.
+@@ -157,6 +158,7 @@ public:
+         usrp->set_gpio_attr("FP0", "ATR_XX", 0x7f, 0x7f);
+       }
+     });
++// <<< AraSDR/AraRACH contribution (end)
+   }
+ 
+   bool is_connection_valid()
+diff --git a/lib/radio/uhd/radio_uhd_tx_stream.cpp b/lib/radio/uhd/radio_uhd_tx_stream.cpp
+index d1ac2d2ed8..acc7bc87aa 100644
+--- a/lib/radio/uhd/radio_uhd_tx_stream.cpp
++++ b/lib/radio/uhd/radio_uhd_tx_stream.cpp
+@@ -11,7 +11,9 @@ using namespace ocudu;
+ /// Receive asynchronous message timeout in seconds.
+ static constexpr double RECV_ASYNC_MSG_TIMEOUT_S = 0.001;
+ /// Transmit timeout in seconds.
++// >>> AraSDR/AraRACH contribution (begin)
+ static constexpr double TRANSMIT_TIMEOUT_S = 0.002;
++// <<< AraSDR/AraRACH contribution (end)
+ 
+ void radio_uhd_tx_stream::recv_async_msg()
+ {
+diff --git a/tests/unittests/phy/lower/lower_phy_test.cpp b/tests/unittests/phy/lower/lower_phy_test.cpp
+index 2f21bd5384..e1ae8fae33 100644
+--- a/tests/unittests/phy/lower/lower_phy_test.cpp
++++ b/tests/unittests/phy/lower/lower_phy_test.cpp
+@@ -27,7 +27,9 @@ namespace ocudu {
+ 
+ auto to_tuple(const downlink_processor_configuration& config)
+ {
++// >>> AraSDR/AraRACH contribution (begin)
+   // tdd_config is excluded, tdd_ul_dl_config_common has no operator==.
++// <<< AraSDR/AraRACH contribution (end)
+   return std::tie(config.sector_id,
+                   config.scs,
+                   config.cp,
+diff --git a/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp b/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp
+index 7e37348399..618a581111 100644
+--- a/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp
++++ b/tests/unittests/phy/lower/processors/downlink/lower_phy_downlink_processor_test.cpp
+@@ -384,6 +384,7 @@ INSTANTIATE_TEST_SUITE_P(
+                        ::testing::Values(std::make_tuple(subcarrier_spacing::kHz15, cyclic_prefix::NORMAL),
+                                          std::make_tuple(subcarrier_spacing::kHz30, cyclic_prefix::NORMAL),
+                                          std::make_tuple(subcarrier_spacing::kHz60, cyclic_prefix::EXTENDED))));
++// >>> AraSDR/AraRACH contribution (begin)
+ 
+ // Verifies that the TDD-aware burst gating in downlink_processor_baseband_impl produces the right metadata
+ // (is_empty / tx_end) for full-DL, partial-DL (special) and UL slots, walking one full TDD period at slot boundaries.
+@@ -492,3 +493,4 @@ TEST(LowerPhyDownlinkProcessorTddGating, FddPathUnaffected)
+     r.buffer = nullptr;
+   }
+ }
++// <<< AraSDR/AraRACH contribution (end)

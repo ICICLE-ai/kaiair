@@ -1,0 +1,49 @@
+From 182f02af3f9096e49317419d47bcd2310271c6f8 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 10 Aug 2026 12:22:04 -0500
+Subject: [PATCH 06/12] kaiair: bound the DIGITAL UL backoff depth
+ (KAIAIR_UL_PWR_MIN_DB, default 20) - root cause of the week's noise-burst
+ collapse
+
+The B210 PA emits its broadband noise floor regardless of digital amplitude, so deep
+digital scaling at full analog gain sinks the wanted signal toward the UE's own
+transmitted noise (received ~-25 dBFS through the new high-gain antennas) and the
+link collapses. Verified on HW: stock full-amplitude = stable 23 dB SINR for 8 min;
+our loop with unbounded (-20 dB) digital backoff = reproducible collapse in ~60 s;
+same loop with the floor at -6 dB = 6+ min stable, NI pinned at -46, no burst.
+Deeper backoff belongs in analog gain (hybrid actuation - next increment).
+---
+ openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c b/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
+index c542c6a517..63054f8e76 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
+@@ -1127,9 +1127,23 @@ void nr_ue_ulsch_procedures(PHY_VARS_NR_UE *UE,
+     kaiair_scale_raw = 1.0f; // tx_power<=P_CMAX by construction; guard rounding/clip above full scale
+   if (kaiair_scale_raw < 0.0f)
+     kaiair_scale_raw = 0.0f;
+-  // Safety floor (-20 dB): closed-loop backoff is bounded, so never let the RA/init transient or a
+-  // runaway pull the link below this. floor = 10^(-20/20) = 0.1.
+-  static const float kaiair_pwr_floor = 0.1f;
++  // Safety floor on the DIGITAL backoff depth, env-configurable via KAIAIR_UL_PWR_MIN_DB
++  // (default 20 -> floor 10^(-20/20) = 0.1, the historical value).
++  // KaiAir 2026-08: deep digital scaling at full ANALOG gain is exactly how the B210 poisons the
++  // band - the PA emits its broadband noise floor regardless of digital amplitude, so as the
++  // wanted signal is scaled down it sinks toward the UE's own transmitted noise (received at
++  // ~-25 dBFS through the high-gain antennas) and the link collapses. Verified: stock full
++  // amplitude = stable 23 dB SINR; our loop backing off digitally = reproducible collapse.
++  // Bounding the digital depth (e.g. 6 dB) keeps the signal well above the emitted noise while
++  // preserving useful closed-loop authority; deeper backoff belongs in ANALOG gain (hybrid, TBD).
++  static float kaiair_pwr_floor = -1.0f;
++  if (kaiair_pwr_floor < 0.0f) {
++    const char *kaiair_min = getenv("KAIAIR_UL_PWR_MIN_DB");
++    float min_db = kaiair_min ? atof(kaiair_min) : 20.0f;
++    if (min_db < 0.0f || min_db > 40.0f)
++      min_db = 20.0f;
++    kaiair_pwr_floor = powf(10.0f, -min_db / 20.0f);
++  }
+   // When not applying, force scale 1.0 so amp==AMP and data is untouched (bit-for-bit stock).
+   const float kaiair_scale_eff = kaiair_ul_pwr_apply ? fmaxf(kaiair_scale_raw, kaiair_pwr_floor) : 1.0f;
+   const int kaiair_amp = (int)lroundf((float)AMP * kaiair_scale_eff); // for DMRS/PT-RS (AMP-referenced)

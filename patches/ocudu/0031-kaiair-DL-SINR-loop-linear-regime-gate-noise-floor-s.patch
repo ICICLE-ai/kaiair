@@ -1,0 +1,82 @@
+From c68ccaa97a8751567c961bb6c371864112837240 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 12 Aug 2026 11:17:09 -0500
+Subject: [PATCH 31/52] kaiair: DL SINR loop, linear-regime gate + noise-floor
+ shed ceiling
+
+Bench bug: with enough shed the PDSCH sits at/below the UE noise floor, the
+reported SINR saturates (~-3 dB) instead of falling dB-linearly, so the FPE
+normalization (report + offset) overestimates, the estimator mean/sigma get
+corrupted, and the loop bang-bangs 0<->15 dB (observed as a square-wave DL
+power chart and DL SINR swinging -3..21). Two guards:
+- estimator only ingests linear-regime samples (offset ~0 or report > 5 dB)
+- shed ceiling keeps the predicted REPORT >= 5 dB so the loop never sheds
+  itself blind (full authority until the estimator is warm)
+Verified live: DL SINR 18-20 riding the 17.4-19.3 target with a smooth
+4-7 dB shed and 2.4-4.3 dB cushion; no oscillation.
+---
+ .../kaiair/pktr_dl_power_controller.h         |  6 ++++--
+ lib/scheduler/ue_context/ue_cell.cpp          | 19 ++++++++++++++-----
+ 2 files changed, 18 insertions(+), 7 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_dl_power_controller.h b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+index 110350e8eb..605ba6bcab 100644
+--- a/lib/scheduler/kaiair/pktr_dl_power_controller.h
++++ b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+@@ -73,7 +73,7 @@ public:
+   /// Cantelli cushion). Drives pwr_ctrl_offset by the SINR error directly (IPC set-point form):
+   /// SINR above target -> shed more power (offset up), below -> restore power (offset down). The
+   /// per-report step is clamped so one noisy report cannot slam the offset across its range.
+-  void update_sinr(float sinr_db, float target_db)
++  void update_sinr(float sinr_db, float target_db, float max_offset_db = 15.0F)
+   {
+     sinr_mode_          = true; // latches: reports are periodic while the UE is attached
+     latest_dl_sinr_db_  = sinr_db;
+@@ -88,7 +88,9 @@ public:
+     }
+     const float err = sinr_db - target_db; // >0: headroom to shed
+     offset_db_ += std::clamp(sinr_gain_ * err, -sinr_step_max_db_, sinr_step_max_db_);
+-    offset_db_ = std::clamp(offset_db_, 0.0F, 15.0F);
++    // max_offset_db: caller-computed shed ceiling (keeps the PDSCH out of the UE noise-floor
++    // regime, where the report saturates and the loop loses observability).
++    offset_db_ = std::clamp(offset_db_, 0.0F, std::clamp(max_offset_db, 0.0F, 15.0F));
+   }
+ 
+   /// KaiAir/PktR DL-SINR sigma compensation: the offset (dB) that was in force during the slot the CURRENT
+diff --git a/lib/scheduler/ue_context/ue_cell.cpp b/lib/scheduler/ue_context/ue_cell.cpp
+index 25c93eaa2c..95de566284 100644
+--- a/lib/scheduler/ue_context/ue_cell.cpp
++++ b/lib/scheduler/ue_context/ue_cell.cpp
+@@ -184,7 +184,13 @@ void ue_cell::kaiair_handle_dl_sinr(float dl_sinr_db)
+   // Without this, the loop's own actuation inflates Var[SINR] and the Cantelli cushion chases a
+   // self-made disturbance (bench-observed 6-9 dB cushion breathing).
+   const float off_meas = pktr_dl_pc_.offset_at_measurement();
+-  if (not pktr_dl_pc_.sinr_mode() or pktr_dl_pc_.offset_stable_at_measurement()) {
++  // Linear-regime gate: the FPE normalization assumes the actuator is dB-linear in the REPORT, but
++  // once the shed pushes the PDSCH to/below the UE noise floor the reported SINR saturates (bench:
++  // shed 15 -> reported ~-3 while true FPE ~9), so sample+offset OVERESTIMATES and the corrupted
++  // mean/sigma drive a shed<->restore bang-bang cycle. Only samples measured with little shed or
++  // comfortably above the floor enter the estimator.
++  const bool kaiair_linear_regime = (off_meas < 0.5F) or (dl_sinr_db > 5.0F);
++  if ((not pktr_dl_pc_.sinr_mode() or pktr_dl_pc_.offset_stable_at_measurement()) and kaiair_linear_regime) {
+     pktr_dl_link_state_.push_ul_measurement(dl_sinr_db + off_meas, 0.0F); // FPE sample; sigma = std of channel
+   }
+ 
+@@ -195,10 +201,13 @@ void ue_cell::kaiair_handle_dl_sinr(float dl_sinr_db)
+   const float                  cushion = (sigma <= s.sigma_transient_db) ? sigma * k : 0.0F;
+   // Loop input: smoothed CURRENT SINR = full-power-equivalent EWMA mean minus the live offset
+   // (the mean is offset-free by construction above). Falls back to the raw report until warm.
+-  const float loop_sinr_db = (pktr_dl_link_state_.nof_samples() > 10)
+-                                 ? (-pktr_dl_link_state_.mean_ni_db()) - pktr_dl_pc_.offset_db()
+-                                 : dl_sinr_db;
+-  pktr_dl_pc_.update_sinr(loop_sinr_db, gamma + cushion);
++  const bool  warm         = pktr_dl_link_state_.nof_samples() > 10;
++  const float fpe_mean_db  = -pktr_dl_link_state_.mean_ni_db();
++  const float loop_sinr_db = warm ? fpe_mean_db - pktr_dl_pc_.offset_db() : dl_sinr_db;
++  // Shed ceiling: keep the predicted REPORTED SINR >= ~5 dB (above the UE noise-floor saturation)
++  // so the loop never sheds itself blind. Full authority until the estimator is warm.
++  const float max_shed_db = warm ? std::max(0.0F, fpe_mean_db - 5.0F) : 15.0F;
++  pktr_dl_pc_.update_sinr(loop_sinr_db, gamma + cushion, max_shed_db);
+ 
+   if (s.debug_tpc and (pktr_dl_pc_.nof_sinr_reports() % 50 == 1)) {
+     fmt::print("[KaiAir/PktR DL-SINR] rnti={:#06x} DL SINR={:.1f} dB target={:.1f} (gamma_DL={:.1f} + cushion={:.2f}) "

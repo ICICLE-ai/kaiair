@@ -1,0 +1,32 @@
+From 2edc579832c624ddb627a8aff1e0c5085065dbcb Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 14:04:38 -0500
+Subject: [PATCH 37/52] kaiair: include the private-IE header at file scope
+ (was inside the xnap namespace)
+
+---
+ include/ocudu/asn1/xnap/xnap_pdu_contents.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/include/ocudu/asn1/xnap/xnap_pdu_contents.h b/include/ocudu/asn1/xnap/xnap_pdu_contents.h
+index e897e28e8c..5798edfc78 100644
+--- a/include/ocudu/asn1/xnap/xnap_pdu_contents.h
++++ b/include/ocudu/asn1/xnap/xnap_pdu_contents.h
+@@ -11,6 +11,7 @@
+ #pragma once
+ 
+ #include "xnap_ies.h"
++#include "ocudu/asn1/xnap/kaiair_private_ies.h" // KaiAir/PktR: PRIVATE MESSAGE private IEs
+ 
+ namespace asn1 {
+ namespace xnap {
+@@ -5293,8 +5294,7 @@ struct private_ie_container_empty_l {
+   OCUDUASN_CODE unpack(cbit_ref& bref);
+   void          to_json(json_writer& j) const;
+ };
+-// KaiAir/PktR: concrete private IE container for the PktR-Signal exchange (see kaiair_private_ies.h).
+-#include "ocudu/asn1/xnap/kaiair_private_ies.h"
++// KaiAir/PktR: private_msg_ies_container is the concrete KaiAir container (kaiair_private_ies.h, included above).
+ using private_msg_ies_container = kaiair_private_ie_container_l;
+ 
+ // PrivateMessage ::= SEQUENCE

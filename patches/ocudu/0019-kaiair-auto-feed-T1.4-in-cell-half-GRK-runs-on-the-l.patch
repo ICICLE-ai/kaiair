@@ -1,0 +1,80 @@
+From 033f7de9eb738a8ff6b9ffde96069c9844713881 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sun, 26 Jul 2026 12:16:14 -0500
+Subject: [PATCH 19/52] kaiair: auto-feed T1.4 (in-cell half), GRK runs on the
+ live signal map
+
+The metrics view now maintains a pktr_signal_map fed every interval from the UE's
+own reference measurements (PUSCH RSRP + PHR-derived TX power ~ 23 dBm - headroom):
+the intended link's signal level becomes the map's EWMA-smoothed estimate, and GRK
+candidates come from map.candidates_for() instead of an ad-hoc vector. The bench
+cross-cell interferer (KAIAIR_PKTR_GRK_XRX_DB) enters the SAME map as a pseudo-node,
+so the T1.5b neighbour-measurement feed can replace the env path without touching
+the GRK consumer. New "PktR MAP" line shows gain count + smoothed signal + UE tx est.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 40 ++++++++++++++-----
+ 1 file changed, 29 insertions(+), 11 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index e54b1cc5a8..27ca4842ac 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -4,6 +4,7 @@
+ #include "kaiair_pktr_metrics_view.h"
+ #include "lib/scheduler/kaiair/pktr_grk.h" // GRK exclusion-region / K, observe-only view
+ #include "lib/scheduler/kaiair/pktr_runtime_config.h"
++#include "lib/scheduler/kaiair/pktr_signal_map.h" // auto-feed: live per-link gain map (T1.4)
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
+ #include <chrono>
+@@ -290,22 +291,39 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+                      e_max,
+                      e_max - ue.pktr_mean_ni_db);
+ 
+-          // ---- GRK (observe-only): the exclusion region / K that K-adaptation would size against the
+-          //      E_max[I_R] budget, given the observed cross-cell interferers. Printed only, NOT enforced
+-          //      (no scheduling change). Single cell => no interferer => ER empty; on the 2-cell bench,
+-          //      set KAIAIR_PKTR_GRK_XRX_DB to the calibrated interferer RSRP to see real K/ER.
++          // ---- GRK (observe-only) fed by the LIVE signal map (auto-feed T1.4, in-cell half). ----
++          // The map is updated every interval from the UE's own reference measurements (PUSCH RSRP +
++          // PHR-derived TX power), so the intended link's signal level is the map's EWMA-smoothed
++          // estimate, not a single-interval sample. Cross-cell interferers enter the SAME map: for
++          // now via the bench-calibrated KAIAIR_PKTR_GRK_XRX_DB pseudo-node (id 0xffff); the
++          // neighbour-measurement feed (T1.5b) will replace that env path without touching the GRK
++          // consumer below. Printed only, NOT enforced (no scheduling change yet).
+           const kaiair::pktr_settings& gcfg = kaiair::pktr_runtime();
+           if (gcfg.grk_view) {
+-            std::vector<kaiair::grk_interferer> cands;
++            static kaiair::pktr_signal_map map; // process-wide Tier-A map (single cell per process)
++            const uint32_t rx_id = cell.pci;
++            const uint32_t tx_id = to_value(ue.rnti);
++            // In-cell feed: UE TX power estimated from PHR (P_tx ~ P_CMAX 23 dBm - headroom).
++            const float tx_pwr_est = 23.0F - static_cast<float>(ue.last_phr.value_or(0));
++            map.update_gain(tx_id, rx_id, ue.pusch_rsrp_db, tx_pwr_est);
++            map.set_node(tx_id, tx_pwr_est, 1.0F);
++            // Cross-cell (bench-calibrated until T1.5b): pseudo-node in received-power space (tx 0),
++            // so K = RSRP_signal - RSRP_interferer is the boundary signal-to-interferer ratio.
+             if (!std::isnan(gcfg.grk_xcell_rx_db)) {
+-              // Received-power space: the interferer's "gain" is its RSRP at this gNB (tx power 0), so
+-              // K = RSRP_signal - RSRP_interferer is the boundary signal-to-interferer ratio.
+-              cands.push_back(kaiair::grk_interferer{0xffffu, gcfg.grk_xcell_rx_db, 0.0F, gcfg.grk_xcell_activity});
++              map.update_gain(0xffffu, rx_id, gcfg.grk_xcell_rx_db, 0.0F);
++              map.set_node(0xffffu, 0.0F, gcfg.grk_xcell_activity);
+             }
+-            const kaiair::grk_state grk = kaiair::size_exclusion_region(ue.pusch_rsrp_db, e_max, std::move(cands));
++            // Smoothed signal level from the map (gain + tx power); falls back to the raw sample.
++            const float signal_db = map.gain_db(tx_id, rx_id).value_or(ue.pusch_rsrp_db - tx_pwr_est) + tx_pwr_est;
++            const kaiair::grk_state grk =
++                kaiair::size_exclusion_region(signal_db, e_max, map.candidates_for(rx_id, tx_id));
++            fmt::print("    PktR MAP       : {} link gain(s); signal(smoothed)={:.1f} dBFS, UE tx~{:.0f} dBm (PHR)\n",
++                       map.nof_gains(),
++                       signal_db,
++                       tx_pwr_est);
+             if (std::isnan(gcfg.grk_xcell_rx_db)) {
+-              fmt::print("    PktR GRK       : no cross-cell interferer configured -> ER empty, K-adaptation idle "
+-                         "(set KAIAIR_PKTR_GRK_XRX_DB to the bench interferer RSRP on the 2-cell setup)\n");
++              fmt::print("    PktR GRK       : no cross-cell interferer in map -> ER empty, K-adaptation idle "
++                         "(cross-cell auto-feed T1.5b pending; bench override: KAIAIR_PKTR_GRK_XRX_DB)\n");
+             } else {
+               fmt::print("    PktR GRK       : interferer RSRP={:.1f} dBFS vs E_max={:.1f} -> ER={} node(s), "
+                          "K={:+.1f} dB, residual I={:.1f} dBFS   (observe-only, not enforced)\n",

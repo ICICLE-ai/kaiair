@@ -1,0 +1,318 @@
+From f6397f32467ffe4d27b83595dba96dfdd0424eb7 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 6 Jul 2026 13:41:02 -0500
+Subject: [PATCH 12/52] kaiair: GRK (Gain-Ratio-K) interference model +
+ K-adaptation core (Phase 3)
+
+Slow-loop interference-coordination substrate. Given a gain map (per-interferer
+G(C,R), expected tx power, activity) and the tolerable interference budget
+E_max[I_R] from pktr_ipc, size the exclusion region and derive K = G(T,R)/G(boundary).
+
+- lib/scheduler/kaiair/pktr_grk.h (header-only, pure math): grk_interferer gain-map
+  row abstraction; in_exclusion_region() PRK membership (C in ER <=> G(C,R) >= G_TR/K);
+  size_exclusion_region() sorts by gain, admits strongest until residual <= budget,
+  derives K from the boundary node; interference_error_db() = E_max - I_current (the
+  K-adaptation driver). Interference sums in the linear domain.
+- pktr_grk_test.cpp: 9 deterministic unit tests (membership, ER sizing in gain order,
+  K == G_TR - G_boundary, monotonicity, residual <= budget, IPC->GRK end-to-end).
+  All 5 PktR suites pass.
+
+Covers T3.1-T3.2. Consumes the gain map as an abstraction, decoupled from the
+signal-map plumbing (T1.3/T1.4). Not yet wired into the scheduler (T3.4) -- unit-
+tested only; meaningful HW validation needs a 2nd interfering cell (M2).
+---
+ lib/scheduler/kaiair/pktr_grk.h               | 153 ++++++++++++++++++
+ .../unittests/scheduler/kaiair/CMakeLists.txt |   4 +
+ .../scheduler/kaiair/pktr_grk_test.cpp        | 111 +++++++++++++
+ 3 files changed, 268 insertions(+)
+ create mode 100644 lib/scheduler/kaiair/pktr_grk.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_grk_test.cpp
+
+diff --git a/lib/scheduler/kaiair/pktr_grk.h b/lib/scheduler/kaiair/pktr_grk.h
+new file mode 100644
+index 0000000000..d23c36e25c
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_grk.h
+@@ -0,0 +1,153 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, GRK (Gain-Ratio-K) interference model and K-adaptation, the slow (network) loop.
++//
++// The Physical-Ratio-K (PRK) model turns "which nodes interfere with link (T->R)?", impractical to
++// answer by measuring every interferer's contribution, into a single, adaptable gain threshold.
++// A node C is a *significant* interferer for the link (T->R) iff its gain to the receiver is within
++// a factor K of the intended-signal gain:
++//
++//   C in ExclusionRegion(T->R)   <=>   G(C,R) >= G(T,R) / K.
++//
++// Nodes inside the exclusion region (ER) are prevented from transmitting concurrently (by the ONAMA
++// TDMA gate, Phase 5); the residual interference then comes only from the weaker, out-of-ER nodes.
++// K trades reliability against spatial reuse: larger K => larger ER => fewer concurrent transmitters
++// => less interference but lower reuse.
++//
++// K-adaptation sizes the ER so that the expected *residual* interference (from out-of-ER nodes) stays
++// within the budget the power-control loop can tolerate, i.e. E_max[I_R] = S - gamma - sigma*k(beta)
++// from pktr_ipc.h (the dual of the Cantelli transmit-power target). The interference-control error
++//
++//   Delta_I_R = E_max[I_R] - I_current
++//
++// drives it: Delta_I_R < 0 (interference exceeds budget) grows the ER (raises K); Delta_I_R > 0
++// (headroom) lets it shrink (lowers K), reclaiming reuse.
++//
++// This header consumes a *gain map* only as an abstraction: the caller supplies, per candidate
++// interferer C, the gain G(C,R), C's expected transmit power E[P_C], and its activity factor
++// E[alpha_C] (from scheduling statistics). Where those come from, PUSCH/SRS RSRP + PHR for in-cell
++// gains, neighbour-cell SSB-RSRP via TDD reciprocity for cross-cell gains, is the signal-map's job
++// (Phase 1, T1.3/T1.4), not this module's.
++//
++// Units: gains, powers, E_max and I_R are in dB / dBm; interference powers are summed in the linear
++// domain (they add as powers, not in dB). The module is otherwise pure math: no scheduler state.
++
++#pragma once
++
++#include "pktr_ipc.h" // E_max[I_R] budget shares the (gamma, beta, sigma) machinery
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <vector>
++
++namespace ocudu {
++namespace kaiair {
++
++/// dB -> linear power ratio.
++inline float db_to_lin(float db)
++{
++  return std::pow(10.0F, db * 0.1F);
++}
++
++/// linear power ratio -> dB (floored to avoid log(0)).
++inline float lin_to_db(float lin)
++{
++  return 10.0F * std::log10(std::max(lin, 1e-30F));
++}
++
++/// One candidate interferer C as seen by receiver R (a gain-map row).
++struct grk_interferer {
++  /// Node / link identifier (opaque to this module).
++  uint32_t id = 0;
++  /// Gain G(C,R) from interferer C to receiver R (dB).
++  float gain_db = 0.0F;
++  /// Expected transmit power E[P_C] of C (dBm).
++  float tx_power_db = 0.0F;
++  /// Expected activity factor E[alpha_C] in [0, 1] (fraction of time C transmits).
++  float activity = 1.0F;
++
++  /// Expected received interference power this node contributes at R, in the linear domain:
++  /// E[alpha_C] * P_C * G(C,R).
++  float expected_interference_lin() const
++  {
++    return std::clamp(activity, 0.0F, 1.0F) * db_to_lin(tx_power_db + gain_db);
++  }
++  /// Same, in dB.
++  float expected_interference_db() const { return lin_to_db(expected_interference_lin()); }
++};
++
++/// Result of GRK exclusion-region sizing for one link.
++struct grk_state {
++  /// K in dB (i.e. 10*log10(K)); the ER gain threshold is signal_gain_db - k_db.
++  float k_db = 0.0F;
++  /// Identifiers of the nodes inside the ER (must not transmit concurrently with this link).
++  std::vector<uint32_t> exclusion_region;
++  /// Expected residual interference from the out-of-ER nodes (dB); this is what the link still sees.
++  float residual_interference_db = lin_to_db(0.0F);
++
++  /// Whether node \c id is in the exclusion region.
++  bool in_er(uint32_t id) const
++  {
++    return std::find(exclusion_region.begin(), exclusion_region.end(), id) != exclusion_region.end();
++  }
++};
++
++/// PRK membership test: node with gain \c gain_cr_db to R is in the ER of a link whose intended-signal
++/// gain is \c signal_gain_db, for the given \c k_db, iff G(C,R) >= G(T,R)/K.
++inline bool in_exclusion_region(float gain_cr_db, float signal_gain_db, float k_db)
++{
++  return gain_cr_db >= signal_gain_db - k_db;
++}
++
++/// Interference-control error Delta_I_R = E_max[I_R] - I_current (dB). Negative => over budget
++/// (grow the ER); positive => headroom (the ER may shrink).
++inline float interference_error_db(float e_max_db, float current_i_r_db)
++{
++  return e_max_db - current_i_r_db;
++}
++
++/// Size the exclusion region so the expected residual interference from out-of-ER nodes is at most
++/// the tolerable budget \c e_max_db, and derive K from the boundary node.
++///
++/// Sorts the candidates by gain (descending, PRK order) and admits the strongest into the ER, one
++/// at a time, until the running residual (sum of the remaining, weaker nodes' expected interference)
++/// drops to \c e_max_db. K is then set from the weakest node inside the ER (the boundary B):
++/// K = G(T,R)/G(B,R), i.e. k_db = signal_gain_db - gain_db(B).
++///
++/// If the candidates are already within budget the ER is empty (k_db = 0). If excluding every
++/// candidate still cannot meet the budget (an infeasible target), all are admitted (best effort).
++///
++/// \param signal_gain_db  Intended-link gain G(T,R) to the receiver (dB).
++/// \param e_max_db        Tolerable residual interference budget (dB), typically E_max[I_R] from
++///                        pktr_ipc, net of any noise floor the caller folds in.
++/// \param candidates      Gain-map rows for the candidate interferers (taken by value; reordered).
++inline grk_state size_exclusion_region(float signal_gain_db, float e_max_db, std::vector<grk_interferer> candidates)
++{
++  std::sort(candidates.begin(), candidates.end(), [](const grk_interferer& a, const grk_interferer& b) {
++    return a.gain_db > b.gain_db;
++  });
++
++  // Residual starts as the interference from *all* candidates (nothing excluded yet).
++  double residual_lin = 0.0;
++  for (const grk_interferer& c : candidates) {
++    residual_lin += c.expected_interference_lin();
++  }
++  const double e_max_lin = db_to_lin(e_max_db);
++
++  grk_state st;
++  for (const grk_interferer& c : candidates) {
++    if (residual_lin <= e_max_lin) {
++      break; // budget met, stop admitting nodes to the ER
++    }
++    // Admit the strongest remaining node: it will be silenced, so remove it from the residual.
++    residual_lin -= c.expected_interference_lin();
++    st.exclusion_region.push_back(c.id);
++    st.k_db = signal_gain_db - c.gain_db; // boundary node (weakest in ER so far) sets K
++  }
++  st.residual_interference_db = lin_to_db(std::max(residual_lin, 0.0));
++  return st;
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index d902fc8db3..98aaeda21c 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -16,3 +16,7 @@ add_test(pktr_runtime_config_test pktr_runtime_config_test)
+ add_executable(pktr_dl_power_controller_test pktr_dl_power_controller_test.cpp)
+ target_link_libraries(pktr_dl_power_controller_test ocudulog gtest gtest_main)
+ add_test(pktr_dl_power_controller_test pktr_dl_power_controller_test)
++
++add_executable(pktr_grk_test pktr_grk_test.cpp)
++target_link_libraries(pktr_grk_test ocudulog gtest gtest_main)
++add_test(pktr_grk_test pktr_grk_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_grk_test.cpp b/tests/unittests/scheduler/kaiair/pktr_grk_test.cpp
+new file mode 100644
+index 0000000000..5cedcb73bf
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_grk_test.cpp
+@@ -0,0 +1,111 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_grk.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++// dB <-> linear round-trips and the known anchor points.
++TEST(pktr_grk_test, db_lin_helpers)
++{
++  EXPECT_NEAR(db_to_lin(0.0F), 1.0F, 1e-6F);
++  EXPECT_NEAR(db_to_lin(10.0F), 10.0F, 1e-4F);
++  EXPECT_NEAR(db_to_lin(-10.0F), 0.1F, 1e-6F);
++  EXPECT_NEAR(lin_to_db(1.0F), 0.0F, 1e-4F);
++  EXPECT_NEAR(lin_to_db(100.0F), 20.0F, 1e-3F);
++  EXPECT_NEAR(lin_to_db(db_to_lin(-73.5F)), -73.5F, 1e-2F); // round-trip
++}
++
++// PRK membership: C is in the ER iff G(C,R) >= G(T,R) - K (dB).
++TEST(pktr_grk_test, membership_threshold)
++{
++  const float g_tr = -60.0F, k = 10.0F; // threshold gain = -70 dB
++  EXPECT_TRUE(in_exclusion_region(-65.0F, g_tr, k));  // stronger than threshold -> in ER
++  EXPECT_TRUE(in_exclusion_region(-70.0F, g_tr, k));  // exactly at threshold -> in ER
++  EXPECT_FALSE(in_exclusion_region(-71.0F, g_tr, k)); // weaker than threshold -> out
++  // Larger K lowers the threshold -> more nodes fall inside.
++  EXPECT_TRUE(in_exclusion_region(-71.0F, g_tr, /*k=*/20.0F));
++}
++
++// Delta_I_R sign convention.
++TEST(pktr_grk_test, interference_error_sign)
++{
++  EXPECT_LT(interference_error_db(/*e_max=*/-80.0F, /*i_cur=*/-75.0F), 0.0F); // over budget
++  EXPECT_GT(interference_error_db(/*e_max=*/-70.0F, /*i_cur=*/-75.0F), 0.0F); // headroom
++  EXPECT_FLOAT_EQ(interference_error_db(-75.0F, -75.0F), 0.0F);
++}
++
++// A deterministic three-node topology used across the sizing tests.
++// All nodes: activity 1.0, tx power 0 dBm, so each node's interference == its gain (linear).
++//   C1: gain -70 dB (1e-7), C2: gain -80 dB (1e-8), C3: gain -90 dB (1e-9). Sum = 1.11e-7 (~ -69.6 dB).
++static std::vector<grk_interferer> three_node_topology()
++{
++  return {{1, -70.0F, 0.0F, 1.0F}, {2, -80.0F, 0.0F, 1.0F}, {3, -90.0F, 0.0F, 1.0F}};
++}
++
++// Budget above the total interference -> empty ER, K = 0 (everyone may transmit).
++TEST(pktr_grk_test, size_er_within_budget_empty)
++{
++  const grk_state st = size_exclusion_region(/*G_TR=*/-60.0F, /*e_max=*/-60.0F, three_node_topology());
++  EXPECT_TRUE(st.exclusion_region.empty());
++  EXPECT_FLOAT_EQ(st.k_db, 0.0F);
++  EXPECT_NEAR(st.residual_interference_db, -69.56F, 0.1F); // = 10log10(1.11e-7)
++}
++
++// Budget that requires excluding only the strongest node (C1).
++// After removing C1: residual = 1.1e-8 (~ -79.6 dB) <= e_max = -75 dB.
++TEST(pktr_grk_test, size_er_excludes_strongest_only)
++{
++  const grk_state st = size_exclusion_region(-60.0F, /*e_max=*/-75.0F, three_node_topology());
++  ASSERT_EQ(st.exclusion_region.size(), 1u);
++  EXPECT_EQ(st.exclusion_region[0], 1u);              // strongest interferer
++  EXPECT_FLOAT_EQ(st.k_db, 10.0F);                    // K = G_TR - G_C1 = -60 - (-70)
++  EXPECT_LE(db_to_lin(st.residual_interference_db), db_to_lin(-75.0F) + 1e-12); // residual within budget
++}
++
++// A tighter budget forces excluding the two strongest (C1, C2), in gain order.
++// After removing C1,C2: residual = 1e-9 (-90 dB) <= e_max = -85 dB.
++TEST(pktr_grk_test, size_er_excludes_two_in_gain_order)
++{
++  const grk_state st = size_exclusion_region(-60.0F, /*e_max=*/-85.0F, three_node_topology());
++  ASSERT_EQ(st.exclusion_region.size(), 2u);
++  EXPECT_EQ(st.exclusion_region[0], 1u); // strongest first
++  EXPECT_EQ(st.exclusion_region[1], 2u); // then next-strongest
++  EXPECT_FLOAT_EQ(st.k_db, 20.0F);       // K = G_TR - G_C2 = -60 - (-80)
++}
++
++// Larger K (from a tighter budget) never yields a smaller exclusion region, monotonicity.
++TEST(pktr_grk_test, tighter_budget_grows_er_and_k)
++{
++  const grk_state loose  = size_exclusion_region(-60.0F, -70.0F, three_node_topology());
++  const grk_state tight  = size_exclusion_region(-60.0F, -85.0F, three_node_topology());
++  EXPECT_GE(tight.exclusion_region.size(), loose.exclusion_region.size());
++  EXPECT_GE(tight.k_db, loose.k_db);
++}
++
++// The residual reported after sizing always meets the budget when feasible.
++TEST(pktr_grk_test, residual_meets_budget)
++{
++  for (float e_max : {-72.0F, -78.0F, -83.0F, -88.0F}) {
++    const grk_state st = size_exclusion_region(-60.0F, e_max, three_node_topology());
++    EXPECT_LE(db_to_lin(st.residual_interference_db), db_to_lin(e_max) + 1e-12) << "e_max=" << e_max;
++  }
++}
++
++// The IPC budget feeds GRK directly: E_max[I_R] from pktr_ipc is a valid e_max for sizing.
++TEST(pktr_grk_test, ipc_budget_drives_sizing)
++{
++  pktr_config cfg;
++  cfg.gamma_db = 3.0F;
++  cfg.beta     = 0.9F; // k = 3
++  // Received signal S = -40 dBm, sigma = 2 dB -> E_max = -40 - 3 - 2*3 = -49 dBm.
++  const float e_max = max_tolerable_interference_db(/*S=*/-40.0F, /*sigma=*/2.0F, cfg);
++  EXPECT_NEAR(e_max, -49.0F, 1e-3F);
++  // With interferers well above that budget, the ER must be non-empty.
++  std::vector<grk_interferer> cands = {{1, -30.0F, 0.0F, 1.0F}, {2, -45.0F, 0.0F, 1.0F}};
++  const grk_state st = size_exclusion_region(/*G_TR=*/-20.0F, e_max, cands);
++  EXPECT_FALSE(st.exclusion_region.empty());
++  EXPECT_TRUE(st.in_er(1)); // the -30 dB interferer is way over budget -> excluded
++}

@@ -1,0 +1,45 @@
+From bcab86921b841be58b0a3ca6be48d9fd2a757a1d Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Fri, 28 Aug 2026 21:51:10 -0500
+Subject: [PATCH 49/52] kaiair: GPSDO with generic-NMEA GPS, gps_locked read
+ failure is non-fatal (ref_locked is the real gate); KAIAIR_REQUIRE_GPS_LOCK
+ restores strict mode
+
+---
+ lib/radio/uhd/radio_uhd_impl.cpp | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/lib/radio/uhd/radio_uhd_impl.cpp b/lib/radio/uhd/radio_uhd_impl.cpp
+index 288cd20685..014f86626d 100644
+--- a/lib/radio/uhd/radio_uhd_impl.cpp
++++ b/lib/radio/uhd/radio_uhd_impl.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ 
++#include <cstdlib>
+ #include "radio_uhd_impl.h"
+ #include <thread>
+ #include <uhd/utils/thread_priority.h>
+@@ -244,9 +245,18 @@ radio_session_uhd_impl::radio_session_uhd_impl(const radio_configuration::radio&
+   // Set GPS time if GPSDO is selected.
+   if (radio_config.clock.sync == radio_configuration::clock_sources::source::GPSDO) {
+     if (!wait_sensor_locked("gps_locked", true, CLOCK_TIMEOUT)) {
+-      // It blocks until sync source is locked.
+-      fmt::print("Could not lock reference GPS time source.\n");
+-      return;
++      // KaiAir: on a "generic NMEA GPS" front-end (as on the outdoor X310s) UHD cannot evaluate the
++      // gps_locked sensor and the read throws even while the GPSDO is actually disciplining (a valid
++      // GPS fix is streaming). Treat that as a warning, NOT a fatal error: the ref_locked check just
++      // below is the real gate on the disciplined clock PLL, which is what gives us the carrier
++      // accuracy a COTS UE needs. Set KAIAIR_REQUIRE_GPS_LOCK=1 to restore the strict abort.
++      if (std::getenv("KAIAIR_REQUIRE_GPS_LOCK") != nullptr) {
++        // It blocks until sync source is locked.
++        fmt::print("Could not lock reference GPS time source.\n");
++        return;
++      }
++      fmt::print("KaiAir: gps_locked sensor unreadable (generic NMEA GPS); relying on ref_locked for "
++                 "the GPSDO-disciplined clock.\n");
+     }
+   }
+ 

@@ -1,0 +1,45 @@
+From 6d5e5380f2af969697fedd93c62f2f190d66b550 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sun, 26 Jul 2026 12:34:24 -0500
+Subject: [PATCH 20/52] kaiair: live overlay sinr_target_db now REPLACES the
+ stock PUSCH target in the TPC loop
+
+Previously the ctrl-file/GUI sinr_target only moved gamma (view + E_max) while the
+closed loop kept chasing the static pusch.target_sinr (default 10, unreachable on
+the bench -> UE pinned at max, live target steps invisible). With the overlay
+active, pktr_gamma_now() substitutes the base target so the GUI slider and A/B
+staircase demos actually steer transmit power. Overlay off = stock unchanged.
+---
+ lib/scheduler/support/pusch_power_controller.cpp | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/lib/scheduler/support/pusch_power_controller.cpp b/lib/scheduler/support/pusch_power_controller.cpp
+index 57aa198922..0a6d44d42e 100644
+--- a/lib/scheduler/support/pusch_power_controller.cpp
++++ b/lib/scheduler/support/pusch_power_controller.cpp
+@@ -190,8 +190,12 @@ uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot, float
+       (1.0f - alpha_fractional_pl) *
+       (ref_path_loss_for_target_sinr - latest_phr.value().phr_data_for_pw_ctrl.value().latest_path_loss_db);
+ 
+-  // KaiAir/PktR: lift the SINR target by the adaptive Cantelli cushion (0 = stock behaviour).
+-  float sinr_to_target_diff = pusch_sinr_target_dB + pktr_sinr_target_offset_db + fract_pl_compensation -
++  // KaiAir/PktR: base target is the stock config value, unless the co-design live overlay is active
++  // (KAIAIR_PKTR_CTRL_FILE), in which case the GUI's sinr_target_db REPLACES it, this is what makes
++  // the live target slider (and the A/B staircase demos) actually steer the closed loop. The
++  // adaptive Cantelli cushion is then added on top (0 = stock behaviour).
++  const float kaiair_base_target_db = kaiair::pktr_gamma_now(pusch_sinr_target_dB);
++  float sinr_to_target_diff = kaiair_base_target_db + pktr_sinr_target_offset_db + fract_pl_compensation -
+                               channel_state_manager.get_pusch_average_sinr();
+ 
+   // To prevent that the next PHR is negative (assuming p_cmax and the path-loss do not change over time), the
+@@ -235,8 +239,8 @@ uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot, float
+       fmt::print("[KaiAir/PktR TPC] REGULATING rnti={:#06x} target={:.1f}(base {:.1f}{:+.2f}off)+fpl {:.2f} - meas "
+                  "{:.1f} = diff {:+.2f} -> tpc={} f_cl(pre)={} max_df={:.1f}\n",
+                  to_value(rnti),
+-                 pusch_sinr_target_dB + pktr_sinr_target_offset_db,
+-                 pusch_sinr_target_dB,
++                 kaiair_base_target_db + pktr_sinr_target_offset_db,
++                 kaiair_base_target_db,
+                  pktr_sinr_target_offset_db,
+                  fract_pl_compensation,
+                  channel_state_manager.get_pusch_average_sinr(),

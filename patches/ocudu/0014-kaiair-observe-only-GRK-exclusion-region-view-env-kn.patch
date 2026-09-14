@@ -1,0 +1,103 @@
+From 28e8dfb5f4e602a429488f39b06b57b25acffa26 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 6 Jul 2026 15:07:32 -0500
+Subject: [PATCH 14/52] kaiair: observe-only GRK exclusion-region view + env
+ knobs (Phase 3)
+
+Wire pktr_grk into the per-UE PktR metrics view (display only, no scheduling
+change). Beneath the E_max[I_R] line, print the exclusion region / K that
+K-adaptation would size against the observed cross-cell interferer.
+
+- pktr_runtime_config.h: grk_view (KAIAIR_PKTR_GRK), grk_xcell_rx_db
+  (KAIAIR_PKTR_GRK_XRX_DB, NaN=none), grk_xcell_activity (KAIAIR_PKTR_GRK_XACT).
+- kaiair_pktr_metrics_view.cpp: per UE, build a candidate list (bench-calibrated
+  cross-cell interferer RSRP until the neighbour-RSRP feed lands), size the ER via
+  size_exclusion_region against E_max, print ER/K/residual. Single cell => ER empty.
+
+Builds into gnb; all 6 PktR suites pass. Enforcement (ONAMA) is Phase 5.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 29 +++++++++++++++++++
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 12 ++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 25b81d9734..545e198916 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -2,10 +2,12 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ 
+ #include "kaiair_pktr_metrics_view.h"
++#include "lib/scheduler/kaiair/pktr_grk.h" // GRK exclusion-region / K, observe-only view
+ #include "lib/scheduler/kaiair/pktr_runtime_config.h"
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
+ #include <cmath>
++#include <vector>
+ 
+ using namespace ocudu;
+ 
+@@ -140,6 +142,33 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+                      cfg.gamma_db + cushion,
+                      e_max,
+                      e_max - ue.pktr_mean_ni_db);
++
++          // ---- GRK (observe-only): the exclusion region / K that K-adaptation would size against the
++          //      E_max[I_R] budget, given the observed cross-cell interferers. Printed only, NOT enforced
++          //      (no scheduling change). Single cell => no interferer => ER empty; on the 2-cell bench,
++          //      set KAIAIR_PKTR_GRK_XRX_DB to the calibrated interferer RSRP to see real K/ER.
++          const kaiair::pktr_settings& gcfg = kaiair::pktr_runtime();
++          if (gcfg.grk_view) {
++            std::vector<kaiair::grk_interferer> cands;
++            if (!std::isnan(gcfg.grk_xcell_rx_db)) {
++              // Received-power space: the interferer's "gain" is its RSRP at this gNB (tx power 0), so
++              // K = RSRP_signal - RSRP_interferer is the boundary signal-to-interferer ratio.
++              cands.push_back(kaiair::grk_interferer{0xffffu, gcfg.grk_xcell_rx_db, 0.0F, gcfg.grk_xcell_activity});
++            }
++            const kaiair::grk_state grk = kaiair::size_exclusion_region(ue.pusch_rsrp_db, e_max, std::move(cands));
++            if (std::isnan(gcfg.grk_xcell_rx_db)) {
++              fmt::print("    PktR GRK       : no cross-cell interferer configured -> ER empty, K-adaptation idle "
++                         "(set KAIAIR_PKTR_GRK_XRX_DB to the bench interferer RSRP on the 2-cell setup)\n");
++            } else {
++              fmt::print("    PktR GRK       : interferer RSRP={:.1f} dBFS vs E_max={:.1f} -> ER={} node(s), "
++                         "K={:+.1f} dB, residual I={:.1f} dBFS   (observe-only, not enforced)\n",
++                         gcfg.grk_xcell_rx_db,
++                         e_max,
++                         grk.exclusion_region.size(),
++                         grk.k_db,
++                         grk.residual_interference_db);
++            }
++          }
+         }
+       }
+     }
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index d93376b6af..dbe6e2ffeb 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -60,6 +60,15 @@ struct pktr_settings {
+   /// IPC-DL loop initial / backed-off nominal offset (dB), clamped to [0,15]. The loop modulates DOWN
+   /// from the ceiling (offset 0 = max power) and NEVER goes negative, so it never clips (Check B).
+   float dl_nominal_db = 0.0F;
++  /// Observe-only GRK exclusion-region view (KAIAIR_PKTR_GRK): print the exclusion region / K that
++  /// pktr_grk would size against E_max[I_R]. Not enforced (no scheduling change), diagnostics only.
++  bool grk_view = false;
++  /// Bench-calibrated cross-cell interferer received power at this gNB (dBFS), for the observe-only GRK
++  /// view on the 2-cell bench, until the automatic neighbour-RSRP -> signal-map feed exists (T1.4/T1.5b).
++  /// NaN => no interferer configured (single cell => ER empty).
++  float grk_xcell_rx_db = NAN;
++  /// The bench interferer's activity factor E[alpha] in [0,1].
++  float grk_xcell_activity = 1.0F;
+ };
+ 
+ namespace detail {
+@@ -100,6 +109,9 @@ inline pktr_settings load_pktr_settings()
+   s.dl_loop            = env_flag("KAIAIR_PKTR_DL_LOOP");
+   s.dl_eta             = std::max(0.0F, env_float("KAIAIR_PKTR_DL_ETA", s.dl_eta));
+   s.dl_nominal_db      = std::clamp(env_float("KAIAIR_PKTR_DL_NOMINAL_DB", s.dl_nominal_db), 0.0F, 15.0F);
++  s.grk_view           = env_flag("KAIAIR_PKTR_GRK");
++  s.grk_xcell_rx_db    = env_float("KAIAIR_PKTR_GRK_XRX_DB", NAN);
++  s.grk_xcell_activity = std::clamp(env_float("KAIAIR_PKTR_GRK_XACT", 1.0F), 0.0F, 1.0F);
+   return s;
+ }
+ 

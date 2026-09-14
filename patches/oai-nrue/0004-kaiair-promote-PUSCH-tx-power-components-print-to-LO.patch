@@ -1,0 +1,29 @@
+From 2851c27c202be3c8ef08169898c44d7d8da3777e Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 28 Jul 2026 13:22:22 -0500
+Subject: [PATCH 04/12] kaiair: promote PUSCH tx power components print to
+ LOG_I (bench diagnostic)
+
+Makes P_O_PUSCH / alpha*PL / f_b_f_c visible at default log level; this is
+how the 2026-07-28 open-loop saturation (PL est 111 dB -> OL 51 dBm pinned
+at P_CMAX) and the dead TPC path (f_b_f_c stuck at 0 with the gNB's
+enable_cl_loop_pw_control unset) were diagnosed.
+---
+ openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c
+index e76b9957e9..6edd7a47dc 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c
+@@ -559,7 +559,9 @@ int get_pusch_tx_power_ue(NR_UE_MAC_INST_t *mac,
+     }
+     f_b_f_c = mac->f_b_f_c;
+   }
+-  LOG_D(NR_MAC,
++  // KaiAir/PktR (temporary diagnostic): promoted from LOG_D so the open-loop power terms are
++  // visible at default log level while debugging UL power saturation on the bench.
++  LOG_I(NR_MAC,
+         "PUSCH tx power components P_O_PUSCH=%d, M_pusch_component=%d, alpha*pathloss=%f, delta_TF=%f, f_b_f_c=%d\n",
+         P_O_PUSCH,
+         M_pusch_component,

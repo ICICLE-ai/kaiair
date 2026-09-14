@@ -1,0 +1,1305 @@
+From 015e29dbd180308d28421cc2f912a672fab2843e Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Thu, 20 Aug 2026 16:04:41 -0500
+Subject: [PATCH 34/52] kaiair: multi-cell PRKS coordination plane, DL-victim
+ half (COMPILE-PENDING: no toolchain offline)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Plan steps B1-B5 of COMPLETE_IMPLEMENTATION_PLAN.md, written offline 2026-08-20:
+- include/ocudu/kaiair/pktr_neighbor_store.h: process-wide signal-map feed, CU-CP
+  publishes each UE's serving+neighbor SSB-RSRP (38.133 idx-156 dBm) keyed by C-RNTI
+  (dissertation §4.5.5: the UE only measures, K is computed gNB-side); peer cells'
+  per-link state (K, TX pwr, beta, ER, signal, rx-power-from-us) ingested from the
+  agent's peer-bus snapshot file at ~2 Hz
+- lib/cu_cp/cell_meas_manager_impl.cpp: MeasurementReport hook -> store
+- pktr_conflict_graph.h: PRK ER membership + mutual conflict relation (PRKS §III-D)
+- pktr_slot_gate.h: ONAMA deterministic per-(slot,link) priorities, masks, fail-open
+- pktr_gate_table.h: atomic snapshot the slot path reads (observe | enforce)
+- pktr_er_controller.h: per-tick live K/ER per UE from measured neighbors (signal =
+  serving RSRP, candidates = neighbor RSRPs, E_max = S - gamma_DL - sigma_DL*k), peer
+  links, conflict sets, masks -> gate table
+- intra_slice_scheduler can_allocate_pdsch: gate lookup (KAIAIR_PKTR_ER_GATE)
+- metrics view: runs the tick, emits links[] (what the peer bus forwards), gate counters
+- env: KAIAIR_PKTR_PEERS_FILE, KAIAIR_PKTR_ER_GATE, KAIAIR_PKTR_SSB_DBM
+- unit tests: neighbor store, conflict graph, slot gate (gtest, to run on the bench)
+UL-victim attribution, er_gate live overlay and the background executor are follow-ups.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    |  71 ++++-
+ include/ocudu/kaiair/pktr_neighbor_store.h    | 291 ++++++++++++++++++
+ .../cell_meas_manager_impl.cpp                |  31 ++
+ lib/scheduler/kaiair/pktr_conflict_graph.h    | 124 ++++++++
+ lib/scheduler/kaiair/pktr_er_controller.h     | 167 ++++++++++
+ lib/scheduler/kaiair/pktr_gate_table.h        |  69 +++++
+ lib/scheduler/kaiair/pktr_runtime_config.h    |   8 +
+ lib/scheduler/kaiair/pktr_slot_gate.h         | 107 +++++++
+ .../ue_scheduling/intra_slice_scheduler.cpp   |   9 +-
+ .../unittests/scheduler/kaiair/CMakeLists.txt |  10 +
+ .../kaiair/pktr_conflict_graph_test.cpp       |  78 +++++
+ .../kaiair/pktr_neighbor_store_test.cpp       |  70 +++++
+ .../scheduler/kaiair/pktr_slot_gate_test.cpp  |  79 +++++
+ 13 files changed, 1111 insertions(+), 3 deletions(-)
+ create mode 100644 include/ocudu/kaiair/pktr_neighbor_store.h
+ create mode 100644 lib/scheduler/kaiair/pktr_conflict_graph.h
+ create mode 100644 lib/scheduler/kaiair/pktr_er_controller.h
+ create mode 100644 lib/scheduler/kaiair/pktr_gate_table.h
+ create mode 100644 lib/scheduler/kaiair/pktr_slot_gate.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_neighbor_store_test.cpp
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 7b095b5895..2b49cf874d 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -3,10 +3,12 @@
+ 
+ #include "kaiair_pktr_metrics_view.h"
+ #include "lib/scheduler/kaiair/pktr_grk.h" // GRK exclusion-region / K, observe-only view
++#include "lib/scheduler/kaiair/pktr_er_controller.h" // KaiAir multi-cell: live K/ER + ONAMA masks (B3-B5)
+ #include "lib/scheduler/kaiair/pktr_runtime_config.h"
+ #include "lib/scheduler/kaiair/pktr_signal_map.h" // auto-feed: live per-link gain map (T1.4)
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
++#include <algorithm>
+ #include <chrono>
+ #include <cmath>
+ #include <cstdio>
+@@ -68,6 +70,57 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+   j += fmt::format(R"(,"ldp_on":{})", ldp_live.deadline_ms > 0.0F ? "true" : "false");
+   j += fmt::format(R"(,"ldp_deadline_ms":{:.1f})", ldp_live.deadline_ms > 0.0F ? ldp_live.deadline_ms : 10.0F);
+   j += fmt::format(R"(,"ldp_pkt_beta":{:.3f})", ldp_live.pkt_beta);
++  // KaiAir multi-cell (plan B3-B5): one exclusion-region controller tick per metrics interval, 
++  // live K/ER per UE from the UE's own neighbor-RSRP reports, peer links from the bus, conflict
++  // graph, ONAMA masks published to the scheduler's gate table. The "links" array below is what
++  // the agent's peer bus forwards to the other cells (PktR-Signal).
++  std::vector<kaiair::er_ue_input> er_in;
++  const double cell_dl_res = static_cast<double>(std::max(1U, cell.nof_prbs)) * std::max(1U, cell.nof_dl_slots);
++  for (const scheduler_ue_metrics& ue : cell.ue_metrics) {
++    kaiair::er_ue_input in;
++    in.rnti        = static_cast<uint16_t>(to_value(ue.rnti));
++    in.dl_sigma_db = ue.pktr_dl_sigma_db;
++    in.dl_shed_db  = ue.pktr_dl_offset_db;
++    in.beta        = static_cast<float>(std::min(1.0, ue.tot_pdsch_prbs_used / cell_dl_res));
++    er_in.push_back(in);
++  }
++  constexpr unsigned kaiair_mask_window = 4000; // ~2 s at 30 kHz: > one tick + pipelining margin
++  const kaiair::er_tick_result er =
++      kaiair::er_controller_tick(static_cast<uint16_t>(cell.pci), er_in, cell.slot.count(), kaiair_mask_window);
++  j += fmt::format(R"(,"ssb_dbm":{:.1f},"er_gate":"{}","peer_cells":{},"peer_links":{},"gate_muted":{},"gate_allowed":{})",
++                   s.ssb_pwr_dbm,
++                   er.mode == kaiair::er_gate_mode::enforce ? "enforce"
++                                                            : (er.mode == kaiair::er_gate_mode::observe ? "observe" : "off"),
++                   er.nof_peer_cells,
++                   er.nof_peer_links,
++                   kaiair::gate_table().muted_decisions(),
++                   kaiair::gate_table().allowed_decisions());
++  j += R"(,"links":[)";
++  bool first_link = true;
++  for (size_t i = 0; i < er.ues.size(); ++i) {
++    const kaiair::er_ue_result& r = er.ues[i];
++    j += first_link ? "" : ",";
++    first_link = false;
++    j += fmt::format(R"({{"rnti":"{:#06x}","live":{},"dl_k_db":{:.2f},"dl_er":{},"dl_tx_dbm":{:.1f},"beta":{:.3f},)"
++                     R"("serv_rsrp_dbm":{:.1f},"e_max_dbm":{:.1f},"conflicts":{},"active_frac":{:.3f},"nbr_rsrp_dbm":{{)",
++                     er_in[i].rnti,
++                     r.live ? "true" : "false",
++                     r.k_db,
++                     r.er_size,
++                     s.ssb_pwr_dbm - er_in[i].dl_shed_db,
++                     er_in[i].beta,
++                     r.serv_rsrp_dbm,
++                     r.e_max_dbm,
++                     r.conflicts.size(),
++                     r.active_fraction);
++    bool first_n = true;
++    for (const auto& [pci, v] : r.nbr_rsrp_dbm) {
++      j += fmt::format(R"({}"{}":{:.1f})", first_n ? "" : ",", pci, v);
++      first_n = false;
++    }
++    j += "}}";
++  }
++  j += "]";
+   auto        num = [&](const char* k, bool present, double v) {
+     j += present ? fmt::format(R"(,"{}":{:.3f})", k, v) : fmt::format(R"(,"{}":null)", k);
+   };
+@@ -372,9 +425,23 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+                        map.nof_gains(),
+                        signal_db,
+                        tx_pwr_est);
++            // KaiAir multi-cell: LIVE DL-victim GRK from this UE's own neighbor reports (store).
++            {
++              const auto  pic   = kaiair::neighbor_store().ue_picture(static_cast<uint16_t>(to_value(ue.rnti)));
++              const auto  cands = kaiair::neighbor_store().dl_candidates(static_cast<uint16_t>(to_value(ue.rnti)),
++                                                                         kaiair::wall_now_s());
++              if (!cands.empty()) {
++                std::string nb;
++                for (const auto& c : cands) {
++                  nb += fmt::format(" pci{}={:.0f}dBm(a={:.2f})", c.pci, c.rx_pwr_dbm, c.activity);
++                }
++                fmt::print("    PktR LIVE map  : serving pci{} RSRP={:.0f} dBm; neighbors:{}  [{} peer cells on bus]\n",
++                           pic.serving_pci, pic.serving.rsrp_dbm, nb, kaiair::neighbor_store().peers().size());
++              }
++            }
+             if (std::isnan(gcfg.grk_xcell_rx_db)) {
+-              fmt::print("    PktR GRK       : no cross-cell interferer in map -> ER empty, K-adaptation idle "
+-                         "(cross-cell auto-feed T1.5b pending; bench override: KAIAIR_PKTR_GRK_XRX_DB)\n");
++              fmt::print("    PktR GRK       : no env pseudo-interferer (KAIAIR_PKTR_GRK_XRX_DB); live DL-victim K/ER "
++                         "per UE is in the JSON links[] / ER gate (KAIAIR_PKTR_ER_GATE)\n");
+             } else {
+               fmt::print("    PktR GRK       : interferer RSRP={:.1f} dBFS vs E_max={:.1f} -> ER={} node(s), "
+                          "K={:+.1f} dB, residual I={:.1f} dBFS   (observe-only, not enforced)\n",
+diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
+new file mode 100644
+index 0000000000..260d0a3b6d
+--- /dev/null
++++ b/include/ocudu/kaiair/pktr_neighbor_store.h
+@@ -0,0 +1,291 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, process-wide NEIGHBOR STORE: the multi-cell signal-map feed (LDP/PRKS plan
++// step B1/B2). Two producers, one consumer set:
++//
++//   producer 1 (CU-CP, cell_meas_manager): every RRC MeasurementReport of a UE publishes the
++//     serving-cell and neighbor-cell SSB-RSRP (dBm) keyed by the UE's C-RNTI, the dissertation's
++//     §4.5.5 "signal map updated from intra-frequency measurement reports (38.133)". The UE never
++//     computes K; it only measures.
++//   producer 2 (the co-design agent's peer bus): neighbor gNBs' per-cell info (SSB power) and
++//     per-link state (K, TX power, PRB occupancy beta, ER size) exchanged over UDP, PktR's
++//     "PktR-Signal" message, written to a flat text file this store re-reads at ~2 Hz.
++//   consumers (DU scheduler / metrics view): per-UE candidate interferer lists for the DL-victim
++//     GRK evaluation (signal = serving RSRP, candidates = neighbor RSRPs, SAME dBm scale from the
++//     SAME report), and the peer link table for the UL-victim attribution and the conflict graph.
++//
++// Identity: C-RNTI is the key shared by CU-CP and DU for a UE within one gNB; PCI identifies
++// cells on the peer bus. Thread-safe (mutex); all readers copy out. Header-only, public include
++// so both lib/cu_cp and lib/scheduler can see it.
++
++#pragma once
++
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace ocudu {
++namespace kaiair {
++
++/// One neighbor-cell RSRP sample as reported by a UE (38.133 SS-RSRP, converted to dBm).
++struct nbr_rsrp_sample {
++  float  rsrp_dbm = 0.0F;
++  double ts       = 0.0; // wall-clock seconds
++};
++
++/// A UE's latest measurement picture: serving cell + neighbors, all from the same report.
++struct ue_meas_picture {
++  uint16_t                            serving_pci = 0xffff;
++  nbr_rsrp_sample                     serving;
++  std::map<uint16_t, nbr_rsrp_sample> neighbors; // pci -> sample
++};
++
++/// Per-link state a peer cell publishes (PktR-Signal contents).
++struct peer_link {
++  uint16_t rnti          = 0;
++  float    k_db          = 0.0F; // that link's current K (dB)
++  float    tx_pwr_dbm    = 0.0F; // avg TX power of the link's transmitter (UE for UL, gNB for DL)
++  float    beta          = 0.0F; // transmit probability / PRB occupancy fraction [0,1]
++  unsigned er_size       = 0;    // exclusion-region size (nodes)
++  float    signal_rx_dbm = 0.0F; // desired-signal power at that link's RECEIVER (its serving RSRP)
++  /// Received power at that link's receiver from OTHER cells (its UE's neighbor RSRPs, dBm), 
++  /// this is what lets us decide whether OUR transmitter sits inside THEIR exclusion region.
++  std::map<uint16_t, float> rx_pwr_from_pci_dbm;
++};
++
++struct peer_cell {
++  uint16_t               pci          = 0xffff;
++  float                  ssb_pwr_dbm  = 0.0F;
++  double                 ts           = 0.0;
++  std::vector<peer_link> links;
++};
++
++/// Candidate interferer for the GRK exclusion-region sizing, in the victim's dBm scale.
++struct nbr_candidate {
++  uint16_t pci          = 0xffff;
++  float    rx_pwr_dbm   = 0.0F;  // received power of that cell at the victim (= its SSB RSRP)
++  float    activity     = 1.0F;  // peer's reported beta if known, else 1 (conservative)
++  double   age_s        = 0.0;
++};
++
++class pktr_neighbor_store
++{
++public:
++  /// 38.133 Table 10.1.6.1-1: SS-RSRP report index 0..127 -> dBm = idx - 156.
++  static float rsrp_index_to_dbm(unsigned idx) { return static_cast<float>(idx) - 156.0F; }
++
++  // ---------------------------------------------------------------- producer 1: CU-CP reports
++  void report_ue_measurement(uint16_t rnti, uint16_t serving_pci, float serving_rsrp_dbm,
++                             const std::vector<std::pair<uint16_t, float>>& neighbor_rsrp_dbm, double ts)
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    ue_meas_picture& p = ues_[rnti];
++    p.serving_pci      = serving_pci;
++    p.serving          = {serving_rsrp_dbm, ts};
++    for (const auto& [pci, v] : neighbor_rsrp_dbm) {
++      p.neighbors[pci] = {v, ts};
++    }
++    ++nof_reports_;
++  }
++
++  void forget_ue(uint16_t rnti)
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    ues_.erase(rnti);
++  }
++
++  // ---------------------------------------------------------------- producer 2: peer bus file
++  /// Flat text format written by the agent (one record per line, '#' comments):
++  ///   cell <pci> <ssb_dbm> <ts>
++  ///   link <pci> <rnti_hex> <k_db> <tx_dbm> <beta> <er_size> <signal_rx_dbm>
++  ///   rxpwr <pci> <rnti_hex> <from_pci> <rx_dbm>      (that link's receiver hears cell from_pci)
++  /// Re-read at most every refresh_ms; cheap when the file is absent (env unset => no-op).
++  void refresh_peers_from_file(const char* path, long long now_ms, long long refresh_ms = 500)
++  {
++    if (path == nullptr || *path == '\0') {
++      return;
++    }
++    {
++      std::lock_guard<std::mutex> lk(m_);
++      if (now_ms - last_peer_refresh_ms_ < refresh_ms) {
++        return;
++      }
++      last_peer_refresh_ms_ = now_ms;
++    }
++    FILE* f = std::fopen(path, "r");
++    if (f == nullptr) {
++      return;
++    }
++    std::map<uint16_t, peer_cell> fresh;
++    char line[512];
++    while (std::fgets(line, sizeof(line), f) != nullptr) {
++      char     kind[8] = {0};
++      unsigned pci = 0;
++      if (std::sscanf(line, "%7s %u", kind, &pci) != 2) {
++        continue;
++      }
++      peer_cell& c = fresh[static_cast<uint16_t>(pci)];
++      c.pci        = static_cast<uint16_t>(pci);
++      if (std::strcmp(kind, "cell") == 0) {
++        double ts = 0.0;
++        std::sscanf(line, "%*s %*u %f %lf", &c.ssb_pwr_dbm, &ts);
++        c.ts = ts;
++      } else if (std::strcmp(kind, "link") == 0) {
++        peer_link l;
++        unsigned  rnti = 0, er = 0;
++        if (std::sscanf(line, "%*s %*u %x %f %f %f %u %f", &rnti, &l.k_db, &l.tx_pwr_dbm, &l.beta, &er,
++                        &l.signal_rx_dbm) >= 4) {
++          l.rnti    = static_cast<uint16_t>(rnti);
++          l.er_size = er;
++          c.links.push_back(l);
++        }
++      } else if (std::strcmp(kind, "rxpwr") == 0) {
++        unsigned rnti = 0, from = 0;
++        float    v    = 0.0F;
++        if (std::sscanf(line, "%*s %*u %x %u %f", &rnti, &from, &v) == 3) {
++          for (peer_link& l : c.links) {
++            if (l.rnti == static_cast<uint16_t>(rnti)) {
++              l.rx_pwr_from_pci_dbm[static_cast<uint16_t>(from)] = v;
++            }
++          }
++        }
++      }
++    }
++    std::fclose(f);
++    std::lock_guard<std::mutex> lk(m_);
++    peers_ = std::move(fresh);
++  }
++
++  // ---------------------------------------------------------------- consumers
++  bool has_ue(uint16_t rnti) const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    return ues_.count(rnti) > 0;
++  }
++
++  ue_meas_picture ue_picture(uint16_t rnti) const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    auto it = ues_.find(rnti);
++    return it == ues_.end() ? ue_meas_picture{} : it->second;
++  }
++
++  /// DL-victim candidate list for a UE: every neighbor cell it reported, as received power at the
++  /// UE (dBm), directly comparable with the serving RSRP from the same report. The peer's PRB
++  /// occupancy (if published) becomes the activity factor. Samples older than max_age_s are dropped.
++  std::vector<nbr_candidate> dl_candidates(uint16_t rnti, double now, double max_age_s = 5.0) const
++  {
++    std::vector<nbr_candidate> out;
++    std::lock_guard<std::mutex> lk(m_);
++    auto it = ues_.find(rnti);
++    if (it == ues_.end()) {
++      return out;
++    }
++    for (const auto& [pci, s] : it->second.neighbors) {
++      if (pci == it->second.serving_pci || now - s.ts > max_age_s) {
++        continue;
++      }
++      nbr_candidate c;
++      c.pci        = pci;
++      c.rx_pwr_dbm = s.rsrp_dbm;
++      c.age_s      = now - s.ts;
++      auto pit     = peers_.find(pci);
++      if (pit != peers_.end() && !pit->second.links.empty()) {
++        float b = 0.0F;
++        for (const peer_link& l : pit->second.links) {
++          b = std::max(b, l.beta);
++        }
++        c.activity = b > 0.0F ? b : 1.0F;
++      }
++      out.push_back(c);
++    }
++    return out;
++  }
++
++  std::map<uint16_t, peer_cell> peers() const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    return peers_;
++  }
++
++  /// DL gain of neighbor cell -> this UE (dB, negative path gain): G = SSB_power(peer) - RSRP.
++  /// Falls back to fallback_ssb_dbm (our own cell's SSB power) when the peer never published.
++  bool dl_gain_db(uint16_t rnti, uint16_t nbr_pci, float fallback_ssb_dbm, float& gain_db) const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    auto it = ues_.find(rnti);
++    if (it == ues_.end()) {
++      return false;
++    }
++    auto nit = it->second.neighbors.find(nbr_pci);
++    if (nit == it->second.neighbors.end()) {
++      return false;
++    }
++    float ssb = fallback_ssb_dbm;
++    auto  pit = peers_.find(nbr_pci);
++    if (pit != peers_.end()) {
++      ssb = pit->second.ssb_pwr_dbm;
++    }
++    gain_db = nit->second.rsrp_dbm - ssb;
++    return true;
++  }
++
++  uint64_t nof_reports() const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    return nof_reports_;
++  }
++
++  std::vector<uint16_t> known_ues() const
++  {
++    std::vector<uint16_t> v;
++    std::lock_guard<std::mutex> lk(m_);
++    for (const auto& [rnti, p] : ues_) {
++      v.push_back(rnti);
++    }
++    return v;
++  }
++
++private:
++  mutable std::mutex                  m_;
++  std::map<uint16_t, ue_meas_picture> ues_;
++  std::map<uint16_t, peer_cell>       peers_;
++  long long                           last_peer_refresh_ms_ = 0;
++  uint64_t                            nof_reports_          = 0;
++};
++
++/// Process-wide instance (one gNB process = one cell on this bench).
++inline pktr_neighbor_store& neighbor_store()
++{
++  static pktr_neighbor_store s;
++  return s;
++}
++
++/// Path of the peer-bus file (KAIAIR_PKTR_PEERS_FILE), read once; nullptr => peer bus off.
++inline const char* peers_file_path()
++{
++  static const char* p = std::getenv("KAIAIR_PKTR_PEERS_FILE");
++  return (p != nullptr && *p != '\0') ? p : nullptr;
++}
++
++inline double wall_now_s()
++{
++  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++}
++
++inline long long steady_now_ms_ns()
++{
++  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+index 9b0ec6bff1..536150fd24 100644
+--- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
++++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+@@ -3,6 +3,7 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "cell_meas_manager_impl.h"
++#include "ocudu/kaiair/pktr_neighbor_store.h" // KaiAir/PktR: multi-cell signal-map feed
+ #include "cell_meas_manager_helpers.h"
+ #include "ocudu/cu_cp/cell_meas_manager_config.h"
+ #include "ocudu/rrc/meas_types.h"
+@@ -323,6 +324,36 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
+ 
+   auto& meas_ctxt = ue_meas_context.meas_id_to_meas_context.at(meas_results.meas_id);
+ 
++  // KaiAir/PktR: publish this report into the process-wide neighbor store, the dissertation's
++  // §4.5.5 signal map ("updated from intra-frequency measurement reports, 38.133"). Keyed by the
++  // UE's C-RNTI (the identity the DU scheduler shares with us); SS-RSRP index -> dBm (idx - 156).
++  // The UE only measures; K is computed gNB-side from these values.
++  if (const cu_cp_ue* kaiair_ue = ue_mng.find_ue(ue_index); kaiair_ue != nullptr) {
++    std::optional<uint8_t> kaiair_serv = std::nullopt;
++    if (meas_results.meas_result_serving_mo_list.contains(0)) {
++      kaiair_serv = get_ssb_rsrp(meas_results.meas_result_serving_mo_list[0].meas_result_serving_cell);
++    }
++    std::vector<std::pair<uint16_t, float>> kaiair_nbrs;
++    if (meas_results.meas_result_neigh_cells.has_value()) {
++      for (const auto& rep : meas_results.meas_result_neigh_cells.value().meas_result_list_nr) {
++        const std::optional<uint8_t> r = get_ssb_rsrp(rep);
++        if (rep.pci.has_value() && r.has_value()) {
++          kaiair_nbrs.emplace_back(static_cast<uint16_t>(rep.pci.value()),
++                                   kaiair::pktr_neighbor_store::rsrp_index_to_dbm(r.value()));
++        }
++      }
++    }
++    if (kaiair_serv.has_value()) {
++      const auto&    kaiair_cell = cfg.cells.at(meas_ctxt.nci).serving_cell_cfg;
++      const uint16_t kaiair_pci  = kaiair_cell.pci.has_value() ? static_cast<uint16_t>(kaiair_cell.pci.value()) : 0xffff;
++      kaiair::neighbor_store().report_ue_measurement(static_cast<uint16_t>(kaiair_ue->get_c_rnti()),
++                                                     kaiair_pci,
++                                                     kaiair::pktr_neighbor_store::rsrp_index_to_dbm(kaiair_serv.value()),
++                                                     kaiair_nbrs,
++                                                     kaiair::wall_now_s());
++    }
++  }
++
+   // Handle periodic measurement results.
+   if (cfg.cells.at(meas_ctxt.nci).periodic_report_cfg_id.has_value() &&
+       cfg.cells.at(meas_ctxt.nci).periodic_report_cfg_id.value() == meas_ctxt.report_cfg_id) {
+diff --git a/lib/scheduler/kaiair/pktr_conflict_graph.h b/lib/scheduler/kaiair/pktr_conflict_graph.h
+new file mode 100644
+index 0000000000..2ae3757adf
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_conflict_graph.h
+@@ -0,0 +1,124 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, conflict graph over links (PRKS-TWC §III-D; plan step B4).
++//
++// A link is (transmitter T, receiver R, direction). Under the PRK/GRK model the exclusion region
++// of link (S,R) with parameter K is E_{S,R} = { C : G(C,R) >= G(S,R)/K }, i.e. in dB
++//   C in ER  <=>  rx_pwr_dbm(C at R) >= rx_pwr_dbm(S at R) - K_db
++// (equal-TX-power form; with published TX powers the gains are compared instead).
++// Two links CONFLICT iff (a) they share an end node, or (b) the transmitter of one lies inside the
++// exclusion region of the other, in EITHER direction (the union, deferral is mutual by
++// construction, so no node ever waits on a node that is waiting on it).
++//
++// Pure data + math, header-only, unit-testable offline. The scheduler's slot gate (pktr_slot_gate.h)
++// consumes the conflict sets; the neighbor store supplies the inputs.
++
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <map>
++#include <vector>
++
++namespace ocudu {
++namespace kaiair {
++
++enum class link_dir : uint8_t { dl, ul };
++
++/// A node id that is unique across cells: (pci, rnti) for UEs; (pci, 0) for the gNB itself.
++struct node_id {
++  uint16_t pci  = 0xffff;
++  uint16_t rnti = 0; // 0 = the cell's gNB
++  bool operator==(const node_id& o) const { return pci == o.pci && rnti == o.rnti; }
++  bool operator<(const node_id& o) const { return pci != o.pci ? pci < o.pci : rnti < o.rnti; }
++};
++
++/// A link as known to the conflict graph.
++struct cg_link {
++  uint32_t id = 0;       // stable link id used for priority hashing (e.g. pci<<16 | rnti | dir<<31)
++  node_id  tx;           // transmitter
++  node_id  rx;           // receiver
++  link_dir dir = link_dir::dl;
++  float    k_db = 0.0F;  // link's current K (dB). <= 0 => ER empty (tolerate everything)
++  float    signal_rx_dbm = 0.0F; // desired-signal received power at rx (dBm-scale used below)
++  /// Received power at THIS link's receiver from other nodes' transmitters, same dBm scale.
++  std::map<node_id, float> rx_pwr_from_dbm;
++};
++
++/// Stable link id helper.
++inline uint32_t make_link_id(uint16_t pci, uint16_t rnti, link_dir d)
++{
++  return (static_cast<uint32_t>(d == link_dir::ul ? 1U : 0U) << 31) | (static_cast<uint32_t>(pci) << 16) | rnti;
++}
++
++/// Is node C inside link L's exclusion region? Unknown gains => not in ER (we cannot claim
++/// interference we have not measured; the K regulator will expand K if reliability suffers).
++inline bool in_exclusion_region(const cg_link& l, const node_id& c)
++{
++  if (l.k_db <= 0.0F) {
++    return false;
++  }
++  auto it = l.rx_pwr_from_dbm.find(c);
++  if (it == l.rx_pwr_from_dbm.end()) {
++    return false;
++  }
++  return it->second >= l.signal_rx_dbm - l.k_db;
++}
++
++/// Conflict predicate (PRKS §III-D): shared end node, or mutual-ER membership in either direction.
++inline bool links_conflict(const cg_link& a, const cg_link& b)
++{
++  if (a.id == b.id) {
++    return false;
++  }
++  if (a.tx == b.tx || a.rx == b.rx || a.tx == b.rx || a.rx == b.tx) {
++    return true;
++  }
++  return in_exclusion_region(a, b.tx) || in_exclusion_region(b, a.tx);
++}
++
++/// The conflict graph: links + adjacency (M_i sets).
++class pktr_conflict_graph
++{
++public:
++  void clear() { links_.clear(); }
++  void add_link(const cg_link& l) { links_[l.id] = l; }
++  const std::map<uint32_t, cg_link>& links() const { return links_; }
++
++  /// Conflict set M_i of link id (excludes itself).
++  std::vector<uint32_t> conflict_set(uint32_t id) const
++  {
++    std::vector<uint32_t> out;
++    auto it = links_.find(id);
++    if (it == links_.end()) {
++      return out;
++    }
++    for (const auto& [oid, ol] : links_) {
++      if (links_conflict(it->second, ol)) {
++        out.push_back(oid);
++      }
++    }
++    return out;
++  }
++
++  /// All conflicting pairs (id_a < id_b).
++  std::vector<std::pair<uint32_t, uint32_t>> conflict_pairs() const
++  {
++    std::vector<std::pair<uint32_t, uint32_t>> out;
++    for (auto a = links_.begin(); a != links_.end(); ++a) {
++      for (auto b = std::next(a); b != links_.end(); ++b) {
++        if (links_conflict(a->second, b->second)) {
++          out.emplace_back(a->first, b->first);
++        }
++      }
++    }
++    return out;
++  }
++
++private:
++  std::map<uint32_t, cg_link> links_;
++};
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/kaiair/pktr_er_controller.h b/lib/scheduler/kaiair/pktr_er_controller.h
+new file mode 100644
+index 0000000000..9a52863fe0
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_er_controller.h
+@@ -0,0 +1,167 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, EXCLUSION-REGION CONTROLLER tick (plan steps B3-B5, DL-victim half).
++//
++// Once per tick (today: the 1 s metrics tick; later: a DU background executor) it
++//   1. takes every UE we serve and builds its DL link's GRK state LIVE from the neighbor store:
++//      signal S = the UE's serving-cell RSRP, candidates = the neighbor cells' RSRPs the SAME UE
++//      reported (same dBm scale, no calibration needed), E_max[I_R] = S - gamma_DL - sigma_DL*k(beta)
++//      -> size_exclusion_region() gives K and the ER (PRKS/PktR: K quantized to the boundary
++//      interferer). This replaces the bench-calibrated env pseudo-interferer.
++//   2. adds the PEER links published on the bus (their K, their receivers' view of our cell),
++//   3. builds the conflict graph (mutual ER membership, PRKS §III-D),
++//   4. computes ONAMA masks for OUR links over a look-ahead window and publishes them to the gate
++//      table the scheduler consults (observe-only or enforce per KAIAIR_PKTR_ER_GATE).
++// It also returns a per-UE summary for the telemetry JSON / the peer bus ("links" array).
++
++#pragma once
++
++#include "ocudu/kaiair/pktr_neighbor_store.h"
++#include "pktr_conflict_graph.h"
++#include "pktr_gate_table.h"
++#include "pktr_grk.h"
++#include "pktr_ipc.h"
++#include "pktr_runtime_config.h"
++#include <cstdint>
++#include <cstdlib>
++#include <map>
++#include <memory>
++#include <vector>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Per-UE input the tick needs from the scheduler metrics.
++struct er_ue_input {
++  uint16_t rnti        = 0;
++  float    dl_sigma_db = 0.0F; // DL Cantelli sigma (from the true-SINR link state)
++  float    dl_shed_db  = 0.0F; // current DL power shed (actuator), for the published TX power
++  float    beta        = 0.0F; // PRB-occupancy fraction this interval
++};
++
++/// Per-UE output: the live GRK verdict + what the peer bus publishes.
++struct er_ue_result {
++  uint16_t                  rnti            = 0;
++  bool                      live            = false; // true when built from measured neighbors
++  float                     serv_rsrp_dbm   = 0.0F;
++  float                     e_max_dbm       = 0.0F;
++  float                     k_db            = 0.0F;
++  unsigned                  er_size         = 0;
++  float                     residual_dbm    = 0.0F;
++  std::map<uint16_t, float> nbr_rsrp_dbm;             // pci -> dBm (what this UE hears)
++  std::vector<uint16_t>     er_pcis;                  // cells inside this link's ER
++  std::vector<uint32_t>     conflicts;                // conflicting link ids (ours + peers)
++  float                     active_fraction = 1.0F;   // of the computed mask window
++};
++
++struct er_tick_result {
++  std::vector<er_ue_result> ues;
++  unsigned                  nof_peer_cells = 0;
++  unsigned                  nof_peer_links = 0;
++  er_gate_mode              mode           = er_gate_mode::off;
++};
++
++/// Run one controller tick. \p now_slot is the current slot count (for mask windows), \p window the
++/// look-ahead length in slots (>= the pipelining margin plus one tick's worth of slots).
++inline er_tick_result er_controller_tick(uint16_t                        my_pci,
++                                         const std::vector<er_ue_input>& ues,
++                                         uint32_t                        now_slot,
++                                         unsigned                        window,
++                                         const pktr_settings&            s = pktr_runtime())
++{
++  er_tick_result       out;
++  pktr_neighbor_store& store = neighbor_store();
++  store.refresh_peers_from_file(peers_file_path(), steady_now_ms_ns());
++  const double now = wall_now_s();
++
++  out.mode = parse_gate_mode(std::getenv("KAIAIR_PKTR_ER_GATE"));
++
++  pktr_conflict_graph graph;
++  const float         gamma_dl = pktr_dl_gamma_now(s.dl_gamma_db);
++
++  // 1. Our DL links from live neighbor measurements.
++  for (const er_ue_input& in : ues) {
++    er_ue_result r;
++    r.rnti           = in.rnti;
++    const auto pic   = store.ue_picture(in.rnti);
++    const auto cands = store.dl_candidates(in.rnti, now);
++    if (pic.serving_pci == 0xffff || cands.empty()) {
++      out.ues.push_back(r); // no measurements yet: not live
++      continue;
++    }
++    r.live          = true;
++    r.serv_rsrp_dbm = pic.serving.rsrp_dbm;
++    for (const auto& [pci, smp] : pic.neighbors) {
++      r.nbr_rsrp_dbm[pci] = smp.rsrp_dbm;
++    }
++    // E_max[I_R] in the UE's dBm scale: S - gamma_DL - sigma_DL * k(beta).
++    pktr_config cfg = s.ipc;
++    cfg.gamma_db    = gamma_dl;
++    r.e_max_dbm     = max_tolerable_interference_db(r.serv_rsrp_dbm, in.dl_sigma_db, cfg);
++    std::vector<grk_interferer> gi;
++    for (const nbr_candidate& c : cands) {
++      // Equal-TX-power form: received power stands in for gain (tx term 0), activity = peer beta.
++      gi.push_back(grk_interferer{c.pci, c.rx_pwr_dbm, 0.0F, c.activity});
++    }
++    const grk_state g = size_exclusion_region(r.serv_rsrp_dbm, r.e_max_dbm, std::move(gi));
++    r.k_db            = g.k_db;
++    r.er_size         = static_cast<unsigned>(g.exclusion_region.size());
++    r.residual_dbm    = g.residual_interference_db;
++    for (uint32_t id : g.exclusion_region) {
++      r.er_pcis.push_back(static_cast<uint16_t>(id));
++    }
++
++    cg_link l;
++    l.id            = make_link_id(my_pci, in.rnti, link_dir::dl);
++    l.tx            = {my_pci, 0};
++    l.rx            = {my_pci, in.rnti};
++    l.dir           = link_dir::dl;
++    l.k_db          = g.k_db;
++    l.signal_rx_dbm = r.serv_rsrp_dbm;
++    for (const auto& [pci, v] : r.nbr_rsrp_dbm) {
++      l.rx_pwr_from_dbm[{pci, 0}] = v;
++    }
++    graph.add_link(l);
++    out.ues.push_back(r);
++  }
++
++  // 2. Peer links from the bus (their receivers' view of us decides if WE are in THEIR ER).
++  for (const auto& [pci, cell] : store.peers()) {
++    ++out.nof_peer_cells;
++    for (const peer_link& pl : cell.links) {
++      cg_link l;
++      l.id            = make_link_id(pci, pl.rnti, link_dir::dl);
++      l.tx            = {pci, 0};
++      l.rx            = {pci, pl.rnti};
++      l.dir           = link_dir::dl;
++      l.k_db          = pl.k_db;
++      l.signal_rx_dbm = pl.signal_rx_dbm;
++      for (const auto& [from, v] : pl.rx_pwr_from_pci_dbm) {
++        l.rx_pwr_from_dbm[{from, 0}] = v;
++      }
++      graph.add_link(l);
++      ++out.nof_peer_links;
++    }
++  }
++
++  // 3./4. Conflict sets for OUR links -> ONAMA masks -> gate table.
++  auto snap    = std::make_shared<gate_snapshot>();
++  snap->mode   = out.mode;
++  snap->my_pci = my_pci;
++  for (er_ue_result& r : out.ues) {
++    if (!r.live) {
++      continue;
++    }
++    const uint32_t id = make_link_id(my_pci, r.rnti, link_dir::dl);
++    r.conflicts       = graph.conflict_set(id);
++    link_slot_mask m  = compute_link_mask(id, now_slot, window, r.conflicts);
++    r.active_fraction = active_fraction(m);
++    snap->masks[id]   = std::move(m);
++  }
++  gate_table().publish(std::move(snap));
++  return out;
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/kaiair/pktr_gate_table.h b/lib/scheduler/kaiair/pktr_gate_table.h
+new file mode 100644
+index 0000000000..346931e589
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_gate_table.h
+@@ -0,0 +1,69 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, process-wide GATE TABLE: the slot path's read-only view of the ONAMA masks.
++// A background tick (pktr_er_controller) builds a fresh snapshot {link -> slot mask} and swaps it
++// in atomically; the scheduler's per-UE allocation predicates do one shared_ptr load + map lookup.
++// Never blocks, never throws; an absent link or a slot outside the window FAILS OPEN (allowed).
++
++#pragma once
++
++#include "pktr_conflict_graph.h"
++#include "pktr_slot_gate.h"
++#include <atomic>
++#include <cstdint>
++#include <map>
++#include <memory>
++
++namespace ocudu {
++namespace kaiair {
++
++struct gate_snapshot {
++  er_gate_mode                       mode   = er_gate_mode::off;
++  uint16_t                           my_pci = 0xffff; // this cell (one gNB process = one cell here)
++  std::map<uint32_t, link_slot_mask> masks;           // link id -> mask
++};
++
++class pktr_gate_table
++{
++public:
++  void publish(std::shared_ptr<const gate_snapshot> snap) { std::atomic_store(&snap_, std::move(snap)); }
++  std::shared_ptr<const gate_snapshot> load() const { return std::atomic_load(&snap_); }
++
++  /// Slot-path query for one of OUR links. Returns true when the link may transmit in this slot.
++  /// In observe mode the answer is always true but would-be mutings are counted for telemetry.
++  bool allowed(uint16_t rnti, link_dir dir, uint32_t slot_count)
++  {
++    auto s = load();
++    if (!s || s->mode == er_gate_mode::off) {
++      return true;
++    }
++    auto it = s->masks.find(make_link_id(s->my_pci, rnti, dir));
++    if (it == s->masks.end()) {
++      return true;
++    }
++    if (it->second.at(slot_count)) {
++      allowed_decisions_.fetch_add(1, std::memory_order_relaxed);
++      return true;
++    }
++    muted_decisions_.fetch_add(1, std::memory_order_relaxed);
++    return s->mode != er_gate_mode::enforce;
++  }
++
++  uint64_t muted_decisions() const { return muted_decisions_.load(std::memory_order_relaxed); }
++  uint64_t allowed_decisions() const { return allowed_decisions_.load(std::memory_order_relaxed); }
++
++private:
++  std::shared_ptr<const gate_snapshot> snap_;
++  std::atomic<uint64_t>                muted_decisions_{0};
++  std::atomic<uint64_t>                allowed_decisions_{0};
++};
++
++inline pktr_gate_table& gate_table()
++{
++  static pktr_gate_table t;
++  return t;
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index bf2119ba97..faadb89472 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -97,6 +97,10 @@ struct pktr_settings {
+   /// 10 min; power OFF = 0). The Cantelli bound assumes sigma captures all uncertainty; this
+   /// platform has a hard nonlinearity below a small margin, so the cushion is floored above it.
+   float min_cushion_db = 3.0F;
++  /// KaiAir multi-cell: this cell's SSB transmit power (dBm) as published on the peer bus
++  /// (KAIAIR_PKTR_SSB_DBM; mirror the yaml ssb_block_power_dbm). Used to turn neighbor RSRP
++  /// reports into path gains where absolute gains are needed.
++  float ssb_pwr_dbm = 16.0F;
+ };
+ 
+ namespace detail {
+@@ -151,6 +155,10 @@ inline pktr_settings load_pktr_settings()
+   s.dl_sinr_csi_step_db = std::clamp(env_float("KAIAIR_DL_SINR_CSI_STEP_DB", s.dl_sinr_csi_step_db), 0.25F, 6.0F);
+   s.dl_gamma_db = env_float("KAIAIR_PKTR_DL_GAMMA_DB", s.dl_gamma_db);
+   s.min_cushion_db = std::clamp(env_float("KAIAIR_PKTR_MIN_CUSHION_DB", s.min_cushion_db), 0.0F, 10.0F);
++  s.ssb_pwr_dbm    = env_float("KAIAIR_PKTR_SSB_DBM", s.ssb_pwr_dbm);
++  // Multi-cell knobs read elsewhere (documented here for discoverability):
++  //   KAIAIR_PKTR_PEERS_FILE = path of the peer-bus snapshot (pktr_neighbor_store)
++  //   KAIAIR_PKTR_ER_GATE    = off | observe | enforce   (pktr_slot_gate / gate table)
+   return s;
+ }
+ 
+diff --git a/lib/scheduler/kaiair/pktr_slot_gate.h b/lib/scheduler/kaiair/pktr_slot_gate.h
+new file mode 100644
+index 0000000000..5453b5fe15
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_slot_gate.h
+@@ -0,0 +1,107 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, ONAMA slot gate (PRKS-TWC §III-D, pktR §V; plan step B5).
++//
++// Per slot, every link gets a pseudo-random priority from a deterministic hash of (slot, link id)
++// that EVERY cell computes identically (no message needed per slot). A link is ACTIVE in a slot
++// iff it outranks every link in its conflict set for that slot; otherwise it is MUTED. One winner
++// per conflicting pair per slot => no mutual deferral deadlock; randomization per slot => no
++// starvation; expected share ~ 1/(|M_i|+1) for a full clique.
++//
++// Masks are meant to be precomputed M slots ahead on a background executor (pipelining, as in
++// PktR's OAI prototype) and looked up in the slot path. This header is the pure function core:
++// given the conflict sets, answer "is link L active in slot s?". Gate policy:
++//   off     : never mute (stock scheduling)
++//   observe : compute, count would-be mutings, never mute
++//   enforce : mute losing links (the slice scheduler skips them)
++
++#pragma once
++
++#include <cstdint>
++#include <string_view>
++#include <vector>
++
++namespace ocudu {
++namespace kaiair {
++
++enum class er_gate_mode : uint8_t { off, observe, enforce };
++
++inline er_gate_mode parse_gate_mode(const char* s)
++{
++  if (s == nullptr) {
++    return er_gate_mode::off;
++  }
++  std::string_view v(s);
++  if (v == "enforce" || v == "1") {
++    return er_gate_mode::enforce;
++  }
++  if (v == "observe") {
++    return er_gate_mode::observe;
++  }
++  return er_gate_mode::off;
++}
++
++/// Deterministic per-(slot, link) priority: splitmix64 finalizer over the pair. Identical on every
++/// node by construction; uniform enough that ties are negligible (ties broken by link id).
++inline uint64_t onama_priority(uint32_t slot_count, uint32_t link_id)
++{
++  uint64_t z = (static_cast<uint64_t>(slot_count) << 32) ^ link_id ^ 0x9E3779B97F4A7C15ULL;
++  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++  return z ^ (z >> 31);
++}
++
++/// ACTIVE iff L outranks every conflicting link in this slot (tie -> larger link id wins).
++inline bool onama_active(uint32_t slot_count, uint32_t link_id, const std::vector<uint32_t>& conflict_set)
++{
++  const uint64_t mine = onama_priority(slot_count, link_id);
++  for (uint32_t other : conflict_set) {
++    const uint64_t theirs = onama_priority(slot_count, other);
++    if (theirs > mine || (theirs == mine && other > link_id)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++/// Precomputed activity mask for one link over a window of slots (bit i = slot base+i active).
++struct link_slot_mask {
++  uint32_t              link_id    = 0;
++  uint32_t              base_slot  = 0;
++  std::vector<uint8_t>  active;  // 1 = active, 0 = muted; size = window
++  bool at(uint32_t slot_count) const
++  {
++    const uint32_t i = slot_count - base_slot;
++    return i < active.size() ? active[i] != 0 : true; // outside window => fail-open (never block)
++  }
++};
++
++inline link_slot_mask
++compute_link_mask(uint32_t link_id, uint32_t base_slot, unsigned window, const std::vector<uint32_t>& conflict_set)
++{
++  link_slot_mask m;
++  m.link_id   = link_id;
++  m.base_slot = base_slot;
++  m.active.resize(window);
++  for (unsigned i = 0; i < window; ++i) {
++    m.active[i] = onama_active(base_slot + i, link_id, conflict_set) ? 1 : 0;
++  }
++  return m;
++}
++
++/// Fraction of slots a link is active over a window (for telemetry / the concurrency metric).
++inline float active_fraction(const link_slot_mask& m)
++{
++  if (m.active.empty()) {
++    return 1.0F;
++  }
++  unsigned n = 0;
++  for (uint8_t a : m.active) {
++    n += a;
++  }
++  return static_cast<float>(n) / static_cast<float>(m.active.size());
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+index c241f0e281..4a5ba257b9 100644
+--- a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
++++ b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+@@ -3,6 +3,7 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "intra_slice_scheduler.h"
++#include "../kaiair/pktr_gate_table.h" // KaiAir/PktR: ONAMA exclusion-region gate
+ #include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR LDP: deadline-abandonment of stale retxs
+ #include "../slicing/ran_slice_id.h" // KaiAir/PktR LDP: SRB slice exempt from deadline handling
+ #include <algorithm> // KaiAir/PktR LDP: urgency sort
+@@ -791,7 +792,13 @@ bool intra_slice_scheduler::can_allocate_pdsch(const slice_ue& u, const ue_cell&
+ {
+   // Check if PDCCH/PDSCH is possible for this slot (e.g. not in UL slot or measGap)
+   ocudu_assert(not ue_cc.is_in_fallback_mode(), "Slice UE cannot be in fallback mode");
+-  return ue_cc.is_pdsch_enabled(pdcch_slot, pdsch_slot);
++  if (not ue_cc.is_pdsch_enabled(pdcch_slot, pdsch_slot)) {
++    return false;
++  }
++  // KaiAir/PktR ONAMA exclusion-region gate: a DL link whose per-slot priority loses to a
++  // conflicting neighbor link is muted this slot (enforce) or merely counted (observe). Pure mask
++  // lookup; the masks are built by pktr_er_controller off the slot path. Fails open.
++  return kaiair::gate_table().allowed(static_cast<uint16_t>(u.crnti()), kaiair::link_dir::dl, pdsch_slot.count());
+ }
+ 
+ bool intra_slice_scheduler::can_allocate_pusch(const slice_ue& u, const ue_cell& ue_cc) const
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index 74bd3a82cf..c9a7227c48 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -28,3 +28,13 @@ add_test(pktr_signal_map_test pktr_signal_map_test)
+ add_executable(pktr_ldp_test pktr_ldp_test.cpp)
+ target_link_libraries(pktr_ldp_test ocudulog gtest gtest_main)
+ add_test(pktr_ldp_test pktr_ldp_test)
++
++add_executable(pktr_neighbor_store_test pktr_neighbor_store_test.cpp)
++target_link_libraries(pktr_neighbor_store_test ocudulog gtest gtest_main)
++add_test(pktr_neighbor_store_test pktr_neighbor_store_test)
++add_executable(pktr_conflict_graph_test pktr_conflict_graph_test.cpp)
++target_link_libraries(pktr_conflict_graph_test ocudulog gtest gtest_main)
++add_test(pktr_conflict_graph_test pktr_conflict_graph_test)
++add_executable(pktr_slot_gate_test pktr_slot_gate_test.cpp)
++target_link_libraries(pktr_slot_gate_test ocudulog gtest gtest_main)
++add_test(pktr_slot_gate_test pktr_slot_gate_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp b/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp
+new file mode 100644
+index 0000000000..4635811439
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp
+@@ -0,0 +1,78 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_conflict_graph.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++static cg_link dl_link(uint16_t pci, uint16_t rnti, float k_db, float signal_dbm)
++{
++  cg_link l;
++  l.id            = make_link_id(pci, rnti, link_dir::dl);
++  l.tx            = {pci, 0};
++  l.rx            = {pci, rnti};
++  l.dir           = link_dir::dl;
++  l.k_db          = k_db;
++  l.signal_rx_dbm = signal_dbm;
++  return l;
++}
++
++// Equal-power form: C is in ER iff rx_pwr(C) >= signal - K.
++TEST(pktr_conflict_graph_test, exclusion_region_membership)
++{
++  cg_link l = dl_link(7, 0x4601, 10.0F, -80.0F);
++  l.rx_pwr_from_dbm[{2, 0}] = -85.0F; // 5 dB below signal: inside a 10 dB ER
++  l.rx_pwr_from_dbm[{3, 0}] = -95.0F; // 15 dB below: outside
++  EXPECT_TRUE(in_exclusion_region(l, {2, 0}));
++  EXPECT_FALSE(in_exclusion_region(l, {3, 0}));
++  EXPECT_FALSE(in_exclusion_region(l, {9, 0})); // unmeasured => not claimed
++  l.k_db = 0.0F;                                 // K <= 0 => tolerate everything
++  EXPECT_FALSE(in_exclusion_region(l, {2, 0}));
++}
++
++// Conflict is the UNION of the two ER memberships (mutual by construction).
++TEST(pktr_conflict_graph_test, conflict_is_mutual_union)
++{
++  cg_link a = dl_link(7, 0x4601, 10.0F, -80.0F);
++  cg_link b = dl_link(2, 0x4602, 10.0F, -80.0F);
++  // a's receiver hears b's gNB weakly; b's receiver hears a's gNB strongly.
++  a.rx_pwr_from_dbm[{2, 0}] = -100.0F;
++  b.rx_pwr_from_dbm[{7, 0}] = -82.0F;
++  EXPECT_FALSE(in_exclusion_region(a, b.tx));
++  EXPECT_TRUE(in_exclusion_region(b, a.tx));
++  EXPECT_TRUE(links_conflict(a, b));
++  EXPECT_TRUE(links_conflict(b, a));
++}
++
++// Shared end node always conflicts; no shared node + no ER membership never conflicts.
++TEST(pktr_conflict_graph_test, shared_node_and_independent_links)
++{
++  cg_link a = dl_link(7, 0x4601, 10.0F, -80.0F);
++  cg_link u;
++  u.id  = make_link_id(7, 0x4601, link_dir::ul);
++  u.tx  = {7, 0x4601};
++  u.rx  = {7, 0};
++  u.dir = link_dir::ul;
++  EXPECT_TRUE(links_conflict(a, u)); // same UE/gNB
++  cg_link far = dl_link(3, 0x4603, 10.0F, -80.0F);
++  EXPECT_FALSE(links_conflict(a, far));
++  EXPECT_FALSE(links_conflict(a, a));
++}
++
++TEST(pktr_conflict_graph_test, graph_conflict_sets_and_pairs)
++{
++  pktr_conflict_graph g;
++  cg_link a = dl_link(7, 0x4601, 10.0F, -80.0F);
++  cg_link b = dl_link(2, 0x4602, 10.0F, -80.0F);
++  cg_link c = dl_link(3, 0x4603, 10.0F, -80.0F);
++  b.rx_pwr_from_dbm[{7, 0}] = -82.0F; // b conflicts with a
++  g.add_link(a);
++  g.add_link(b);
++  g.add_link(c);
++  EXPECT_EQ(g.conflict_set(a.id).size(), 1U);
++  EXPECT_EQ(g.conflict_set(a.id)[0], b.id);
++  EXPECT_EQ(g.conflict_set(c.id).size(), 0U);
++  EXPECT_EQ(g.conflict_pairs().size(), 1U);
++}
+diff --git a/tests/unittests/scheduler/kaiair/pktr_neighbor_store_test.cpp b/tests/unittests/scheduler/kaiair/pktr_neighbor_store_test.cpp
+new file mode 100644
+index 0000000000..1a163e550c
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_neighbor_store_test.cpp
+@@ -0,0 +1,70 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "ocudu/kaiair/pktr_neighbor_store.h"
++#include <cstdio>
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++TEST(pktr_neighbor_store_test, rsrp_index_conversion)
++{
++  EXPECT_FLOAT_EQ(pktr_neighbor_store::rsrp_index_to_dbm(0), -156.0F);
++  EXPECT_FLOAT_EQ(pktr_neighbor_store::rsrp_index_to_dbm(76), -80.0F);
++}
++
++TEST(pktr_neighbor_store_test, ue_report_and_dl_candidates)
++{
++  pktr_neighbor_store st;
++  st.report_ue_measurement(0x4601, 7, -80.0F, {{2, -90.0F}, {3, -97.0F}}, 100.0);
++  EXPECT_TRUE(st.has_ue(0x4601));
++  auto pic = st.ue_picture(0x4601);
++  EXPECT_EQ(pic.serving_pci, 7);
++  EXPECT_FLOAT_EQ(pic.serving.rsrp_dbm, -80.0F);
++  auto cands = st.dl_candidates(0x4601, 101.0);
++  ASSERT_EQ(cands.size(), 2U);
++  EXPECT_EQ(cands[0].pci, 2);
++  EXPECT_FLOAT_EQ(cands[0].rx_pwr_dbm, -90.0F);
++  EXPECT_FLOAT_EQ(cands[0].activity, 1.0F); // no peer info => conservative
++  // Aged out.
++  EXPECT_TRUE(st.dl_candidates(0x4601, 200.0).empty());
++  st.forget_ue(0x4601);
++  EXPECT_FALSE(st.has_ue(0x4601));
++}
++
++TEST(pktr_neighbor_store_test, peers_file_parsing_and_gain)
++{
++  const char* path = "/tmp/kaiair_store_test_peers.txt";
++  FILE*       f    = std::fopen(path, "w");
++  std::fputs("# peer bus snapshot\n"
++             "cell 2 16.0 123.0\n"
++             "link 2 4602 8.5 20.0 0.35 1 -78.0\n"
++             "rxpwr 2 4602 7 -84.0\n"
++             "cell 3 13.0 123.0\n",
++             f);
++  std::fclose(f);
++  pktr_neighbor_store st;
++  st.refresh_peers_from_file(path, 1000);
++  auto peers = st.peers();
++  ASSERT_EQ(peers.size(), 2U);
++  EXPECT_FLOAT_EQ(peers[2].ssb_pwr_dbm, 16.0F);
++  ASSERT_EQ(peers[2].links.size(), 1U);
++  EXPECT_EQ(peers[2].links[0].rnti, 0x4602);
++  EXPECT_FLOAT_EQ(peers[2].links[0].k_db, 8.5F);
++  EXPECT_FLOAT_EQ(peers[2].links[0].beta, 0.35F);
++  EXPECT_FLOAT_EQ(peers[2].links[0].signal_rx_dbm, -78.0F);
++  EXPECT_FLOAT_EQ(peers[2].links[0].rx_pwr_from_pci_dbm.at(7), -84.0F);
++  // Rate limit: a second refresh within refresh_ms is a no-op (file unchanged anyway).
++  st.refresh_peers_from_file(path, 1100);
++  // Candidate activity now follows the peer's beta; DL gain uses the peer's SSB power.
++  st.report_ue_measurement(0x4601, 7, -80.0F, {{2, -90.0F}}, 100.0);
++  auto cands = st.dl_candidates(0x4601, 101.0);
++  ASSERT_EQ(cands.size(), 1U);
++  EXPECT_FLOAT_EQ(cands[0].activity, 0.35F);
++  float g = 0.0F;
++  ASSERT_TRUE(st.dl_gain_db(0x4601, 2, 16.0F, g));
++  EXPECT_FLOAT_EQ(g, -106.0F); // -90 dBm RSRP - 16 dBm SSB
++  EXPECT_FALSE(st.dl_gain_db(0x4601, 9, 16.0F, g));
++  std::remove(path);
++}
+diff --git a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+new file mode 100644
+index 0000000000..24d000fd77
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+@@ -0,0 +1,79 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_slot_gate.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++// Deterministic and node-independent: the same (slot, link) always hashes identically.
++TEST(pktr_slot_gate_test, priority_is_deterministic)
++{
++  EXPECT_EQ(onama_priority(1234, 0x00070001), onama_priority(1234, 0x00070001));
++  EXPECT_NE(onama_priority(1234, 0x00070001), onama_priority(1235, 0x00070001));
++  EXPECT_NE(onama_priority(1234, 0x00070001), onama_priority(1234, 0x00020002));
++}
++
++// With no conflicts a link is always active.
++TEST(pktr_slot_gate_test, no_conflict_always_active)
++{
++  for (uint32_t s = 0; s < 100; ++s) {
++    EXPECT_TRUE(onama_active(s, 42, {}));
++  }
++}
++
++// Exactly one winner per conflicting pair per slot (no deadlock, no double-activation).
++TEST(pktr_slot_gate_test, one_winner_per_pair)
++{
++  const uint32_t a = 0x00070001, b = 0x00020002;
++  for (uint32_t s = 0; s < 2000; ++s) {
++    const bool aa = onama_active(s, a, {b});
++    const bool bb = onama_active(s, b, {a});
++    EXPECT_NE(aa, bb) << "slot " << s;
++  }
++}
++
++// Fair share: over many slots each of a 3-clique gets ~1/3 of the slots (no starvation).
++TEST(pktr_slot_gate_test, clique_share_is_fair)
++{
++  const uint32_t ids[3] = {0x00070001, 0x00020002, 0x00030003};
++  unsigned       wins[3] = {0, 0, 0};
++  const unsigned N       = 30000;
++  for (uint32_t s = 0; s < N; ++s) {
++    for (int i = 0; i < 3; ++i) {
++      std::vector<uint32_t> others;
++      for (int j = 0; j < 3; ++j) {
++        if (j != i) {
++          others.push_back(ids[j]);
++        }
++      }
++      wins[i] += onama_active(s, ids[i], others) ? 1 : 0;
++    }
++  }
++  for (unsigned w : wins) {
++    EXPECT_NEAR(static_cast<double>(w) / N, 1.0 / 3.0, 0.02);
++  }
++  EXPECT_EQ(wins[0] + wins[1] + wins[2], N); // exactly one active per slot in a clique
++}
++
++// Masks: window lookup matches the per-slot function; outside the window fails OPEN.
++TEST(pktr_slot_gate_test, mask_matches_and_fails_open)
++{
++  const uint32_t a = 0x00070001, b = 0x00020002;
++  link_slot_mask m = compute_link_mask(a, 1000, 64, {b});
++  for (uint32_t s = 1000; s < 1064; ++s) {
++    EXPECT_EQ(m.at(s), onama_active(s, a, {b}));
++  }
++  EXPECT_TRUE(m.at(5000));
++  EXPECT_NEAR(active_fraction(m), 0.5F, 0.2F);
++}
++
++TEST(pktr_slot_gate_test, gate_mode_parsing)
++{
++  EXPECT_EQ(parse_gate_mode(nullptr), er_gate_mode::off);
++  EXPECT_EQ(parse_gate_mode("observe"), er_gate_mode::observe);
++  EXPECT_EQ(parse_gate_mode("enforce"), er_gate_mode::enforce);
++  EXPECT_EQ(parse_gate_mode("1"), er_gate_mode::enforce);
++  EXPECT_EQ(parse_gate_mode("garbage"), er_gate_mode::off);
++}

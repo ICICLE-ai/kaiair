@@ -1,0 +1,188 @@
+From efb0ac4031318d27367855a7ebcd2fce632eae51 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 11 Aug 2026 18:50:10 -0500
+Subject: [PATCH 30/52] kaiair: LDP deadline is now a LIVE ctrl-file overlay
+ (ldp_deadline_ms), no restarts
+
+The GUI LDP toggle previously restarted the agent + gNB; the dashboard's
+hand-built agent env dropped KAIAIR_DL_SINR_CSI (and could drop everything),
+so the restarted gNB expected 4-bit CSI while the UE sent the 10-bit report,
+every CSI decode failed and RLF tore the link down ('powers off' symptom).
+Now pktr_ldp_now() reads ldp_deadline_ms from the live control file (~2 Hz,
+same overlay as gamma/power): scheduler gates, retx caps, delivery
+classification and the metrics view all follow within a second, gNB PID
+unchanged. Env KAIAIR_PKTR_DEADLINE_MS remains the no-overlay fallback.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 22 ++++++++++---------
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 21 ++++++++++++++++++
+ .../logging/scheduler_metrics_handler.cpp     |  2 +-
+ .../ue_scheduling/intra_slice_scheduler.cpp   |  8 +++----
+ .../ue_scheduling/ue_cell_grid_allocator.cpp  |  4 ++--
+ 5 files changed, 40 insertions(+), 17 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 637cce4f8f..7b095b5895 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -64,9 +64,10 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+   // KaiAir LDP delivery view: config-level fields (independent of which UE reported this interval).
+   // When LDP is OFF the classification still runs against the default 10 ms display deadline, so the
+   // with/without-LDP comparison in the GUI shares one yardstick.
+-  j += fmt::format(R"(,"ldp_on":{})", s.ldp.deadline_ms > 0.0F ? "true" : "false");
+-  j += fmt::format(R"(,"ldp_deadline_ms":{:.1f})", s.ldp.deadline_ms > 0.0F ? s.ldp.deadline_ms : 10.0F);
+-  j += fmt::format(R"(,"ldp_pkt_beta":{:.3f})", s.ldp.pkt_beta);
++  const kaiair::ldp_config ldp_live = kaiair::pktr_ldp_now(); // live GUI toggle, no restart
++  j += fmt::format(R"(,"ldp_on":{})", ldp_live.deadline_ms > 0.0F ? "true" : "false");
++  j += fmt::format(R"(,"ldp_deadline_ms":{:.1f})", ldp_live.deadline_ms > 0.0F ? ldp_live.deadline_ms : 10.0F);
++  j += fmt::format(R"(,"ldp_pkt_beta":{:.3f})", ldp_live.pkt_beta);
+   auto        num = [&](const char* k, bool present, double v) {
+     j += present ? fmt::format(R"(,"{}":{:.3f})", k, v) : fmt::format(R"(,"{}":null)", k);
+   };
+@@ -288,18 +289,19 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+       const float cushion   = ue.pktr_sigma_db * k;            // sigma*k(beta), sigma=sqrt(VarS+VarNI)
+       const float sinr_targ = gamma_live + cushion;            // required UL SINR for (gamma, beta)
+ 
+-      if (sall.ldp.deadline_ms > 0.0F) {
++      const kaiair::ldp_config ldp_now = kaiair::pktr_ldp_now(); // live GUI toggle, no restart
++      if (ldp_now.deadline_ms > 0.0F) {
+         // LDP-TR: X = ceil(log_{1-p}(1-P)) opportunities required at the controlled per-tx beta;
+         // N(D) is what the deadline affords on this TDD cadence. Schedulable when X <= N(D).
+-        const unsigned nof_tx = kaiair::ldp_tx_budget(sall.ldp);
+-        const unsigned x_req  = kaiair::ldp_required_tx_count(sall.ldp.pkt_beta, cfg.beta);
++        const unsigned nof_tx = kaiair::ldp_tx_budget(ldp_now);
++        const unsigned x_req  = kaiair::ldp_required_tx_count(ldp_now.pkt_beta, cfg.beta);
+         fmt::print("    PktR LDP       : deadline={:.1f} ms -> N(D)={} in-deadline tx (first {:.1f} ms, retx {:.1f} ms); "
+                    "pkt-beta {:.3f} @ per-tx beta {:.3f} -> X_required={} ({})\n",
+-                   sall.ldp.deadline_ms,
++                   ldp_now.deadline_ms,
+                    nof_tx,
+-                   sall.ldp.first_tx_ms,
+-                   sall.ldp.retx_interval_ms,
+-                   sall.ldp.pkt_beta,
++                   ldp_now.first_tx_ms,
++                   ldp_now.retx_interval_ms,
++                   ldp_now.pkt_beta,
+                    cfg.beta,
+                    x_req,
+                    x_req <= nof_tx ? "schedulable" : "NOT schedulable in deadline");
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index d77876e9ca..bf2119ba97 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -188,6 +188,9 @@ struct live_controls_t {
+   // KaiAir/PktR DL-SINR: separate DL SINR-target margin (dl_sinr_target_db in the ctrl file). NaN until the
+   // key appears, so an old ctrl file without it falls back to the env value.
+   std::atomic<float>     dl_gamma_db{NAN};
++  // KaiAir LDP: live deadline (ldp_deadline_ms in the ctrl file; 0 = LDP off). NaN until the key
++  // appears, the GUI LDP toggle then works WITHOUT any agent/gNB restart.
++  std::atomic<float>     ldp_deadline_ms{NAN};
+   std::atomic<long long> last_ms{0};      // last refresh (steady ms)
+ };
+ 
+@@ -273,6 +276,8 @@ inline void refresh_live_controls()
+   L.gamma_db.store(gamma, std::memory_order_relaxed);
+   // KaiAir/PktR DL-SINR: the DL target has its own slider; NaN fallback keeps env when the key is absent.
+   L.dl_gamma_db.store(json_float(s, "dl_sinr_target_db", NAN), std::memory_order_relaxed);
++  // KaiAir LDP: live deadline toggle (0 = off); NaN fallback keeps the env deadline.
++  L.ldp_deadline_ms.store(json_float(s, "ldp_deadline_ms", NAN), std::memory_order_relaxed);
+   L.active.store(true, std::memory_order_relaxed);
+ }
+ 
+@@ -297,6 +302,22 @@ inline float pktr_gamma_now(float env_fallback)
+                                                   : env_fallback;
+ }
+ 
++/// KaiAir LDP: live-effective LDP config, the ctrl-file ldp_deadline_ms key (GUI LDP toggle,
++/// 0 = off, NO restart needed) overrides the env deadline when present; timing/beta fields from env.
++inline ldp_config pktr_ldp_now()
++{
++  ldp_config cfg = pktr_runtime().ldp;
++  detail::refresh_live_controls();
++  detail::live_controls_t& L = detail::live_controls();
++  if (L.active.load(std::memory_order_relaxed)) {
++    const float v = L.ldp_deadline_ms.load(std::memory_order_relaxed);
++    if (not std::isnan(v)) {
++      cfg.deadline_ms = v;
++    }
++  }
++  return cfg;
++}
++
+ /// KaiAir/PktR DL-SINR: effective DL SINR-target margin gamma_DL (dB), the live GUI value when the overlay
+ /// carries a dl_sinr_target_db key, else the env value (KAIAIR_PKTR_DL_GAMMA_DB).
+ inline float pktr_dl_gamma_now(float env_fallback)
+diff --git a/lib/scheduler/logging/scheduler_metrics_handler.cpp b/lib/scheduler/logging/scheduler_metrics_handler.cpp
+index 4964647c66..f534255bf6 100644
+--- a/lib/scheduler/logging/scheduler_metrics_handler.cpp
++++ b/lib/scheduler/logging/scheduler_metrics_handler.cpp
+@@ -256,7 +256,7 @@ void cell_metrics_handler::kaiair_handle_tb_outcome(du_ue_index_t ue_index,
+     ++(is_dl ? d.kaiair_ldp_dl_failed : d.kaiair_ldp_ul_failed);
+     return;
+   }
+-  const kaiair::ldp_config& ldp = kaiair::pktr_runtime().ldp;
++  const kaiair::ldp_config ldp = kaiair::pktr_ldp_now();
+   kaiair::ldp_config        view_cfg = ldp;
+   if (view_cfg.deadline_ms <= 0.0F) {
+     view_cfg.deadline_ms = 10.0F; // LDP off: classify against the default 10 ms display deadline
+diff --git a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+index 864d3eac09..c241f0e281 100644
+--- a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
++++ b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+@@ -297,7 +297,7 @@ unsigned intra_slice_scheduler::schedule_dl_retx_candidates(dl_ran_slice_candida
+   // starve a near-deadline packet behind fresher ones. Stock path (LDP off) is untouched.
+   static thread_local std::vector<dl_harq_process_handle> kaiair_dl_ordered;
+   kaiair_dl_ordered.clear();
+-  if (kaiair::pktr_runtime().ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID) {
++  if (kaiair::pktr_ldp_now().deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID) {
+     for (auto it = pending_harqs.begin(); it != pending_harqs.end(); ++it) {
+       kaiair_dl_ordered.push_back(*it);
+     }
+@@ -336,7 +336,7 @@ unsigned intra_slice_scheduler::schedule_dl_retx_candidates(dl_ran_slice_candida
+     // gets no further retx slots (LDP-TR Definition 1 drops post-deadline packets) - the slot goes
+     // to new data instead of being wasted on an already-late TB.
+     {
+-      const auto& kaiair_ldp = kaiair::pktr_runtime().ldp;
++      const auto kaiair_ldp = kaiair::pktr_ldp_now();
+       if (kaiair_ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID and h.kaiair_first_tx_slot().valid()) {
+         const unsigned kaiair_dl_slots =
+             kaiair::ldp_deadline_slots(kaiair_ldp, pdsch_slot.nof_slots_per_subframe());
+@@ -400,7 +400,7 @@ unsigned intra_slice_scheduler::schedule_ul_retx_candidates(ul_ran_slice_candida
+   // KaiAir/PktR LDP: urgency-ordered retx pass (see the DL loop above for rationale).
+   static thread_local std::vector<ul_harq_process_handle> kaiair_ul_ordered;
+   kaiair_ul_ordered.clear();
+-  if (kaiair::pktr_runtime().ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID) {
++  if (kaiair::pktr_ldp_now().deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID) {
+     for (auto it = pending_harqs.begin(); it != pending_harqs.end(); ++it) {
+       kaiair_ul_ordered.push_back(*it);
+     }
+@@ -435,7 +435,7 @@ unsigned intra_slice_scheduler::schedule_ul_retx_candidates(ul_ran_slice_candida
+ 
+     // KaiAir/PktR LDP: deadline abandonment (see the DL retx loop above for rationale).
+     {
+-      const auto& kaiair_ldp = kaiair::pktr_runtime().ldp;
++      const auto kaiair_ldp = kaiair::pktr_ldp_now();
+       if (kaiair_ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID and h.kaiair_first_tx_slot().valid()) {
+         const unsigned kaiair_ul_slots =
+             kaiair::ldp_deadline_slots(kaiair_ldp, pusch_slot.nof_slots_per_subframe());
+diff --git a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+index bf0f2339e4..c82c820447 100644
+--- a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
++++ b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+@@ -261,7 +261,7 @@ ue_cell_grid_allocator::setup_dl_grant_builder(const slice_ue&
+     const unsigned kaiair_dl_max_retxs =
+         user.ran_slice_id() == SRB_RAN_SLICE_ID
+             ? expert_cfg.max_nof_dl_harq_retxs
+-            : kaiair::ldp_capped_max_retxs(kaiair::pktr_runtime().ldp, expert_cfg.max_nof_dl_harq_retxs);
++            : kaiair::ldp_capped_max_retxs(kaiair::pktr_ldp_now(), expert_cfg.max_nof_dl_harq_retxs);
+     h_dl = ue_cc.harqs
+                .alloc_dl_harq(pdsch_alloc.slot,
+                               k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset,
+@@ -642,7 +642,7 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&
+     const unsigned kaiair_ul_max_retxs =
+         user.ran_slice_id() == SRB_RAN_SLICE_ID
+             ? expert_cfg.max_nof_ul_harq_retxs
+-            : kaiair::ldp_capped_max_retxs(kaiair::pktr_runtime().ldp, expert_cfg.max_nof_ul_harq_retxs);
++            : kaiair::ldp_capped_max_retxs(kaiair::pktr_ldp_now(), expert_cfg.max_nof_ul_harq_retxs);
+     h_ul = ue_cc.harqs
+                .alloc_ul_harq(pusch_alloc.slot, kaiair_ul_max_retxs, user.ran_slice_id() == SRB_RAN_SLICE_ID)
+                .value();

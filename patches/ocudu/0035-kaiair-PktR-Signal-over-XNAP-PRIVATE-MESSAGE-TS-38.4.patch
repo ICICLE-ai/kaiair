@@ -1,0 +1,506 @@
+From 4f52eaf440b70a795107b3de0af4549bcec8ed8e Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Thu, 20 Aug 2026 17:53:55 -0500
+Subject: [PATCH 35/52] kaiair: PktR-Signal over XNAP PRIVATE MESSAGE (TS
+ 38.423), private IE container, 500 ms sender/receiver in xnap_impl, store
+ ingest, round-trip test
+
+---
+ include/ocudu/asn1/xnap/kaiair_private_ies.h  | 72 +++++++++++++++++++
+ include/ocudu/asn1/xnap/xnap_pdu_contents.h   |  4 +-
+ include/ocudu/kaiair/pktr_neighbor_store.h    | 70 +++++++++++++++---
+ include/ocudu/kaiair/pktr_xn_signal.h         | 47 ++++++++++++
+ lib/scheduler/kaiair/pktr_er_controller.h     | 24 +++++++
+ lib/xnap/xnap_impl.cpp                        | 41 +++++++++++
+ lib/xnap/xnap_impl.h                          |  9 +++
+ .../unittests/scheduler/kaiair/CMakeLists.txt |  3 +
+ .../scheduler/kaiair/pktr_xn_signal_test.cpp  | 65 +++++++++++++++++
+ 9 files changed, 325 insertions(+), 10 deletions(-)
+ create mode 100644 include/ocudu/asn1/xnap/kaiair_private_ies.h
+ create mode 100644 include/ocudu/kaiair/pktr_xn_signal.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_xn_signal_test.cpp
+
+diff --git a/include/ocudu/asn1/xnap/kaiair_private_ies.h b/include/ocudu/asn1/xnap/kaiair_private_ies.h
+new file mode 100644
+index 0000000000..63956b5ee9
+--- /dev/null
++++ b/include/ocudu/asn1/xnap/kaiair_private_ies.h
+@@ -0,0 +1,72 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, XNAP PRIVATE MESSAGE payload (TS 38.423 §9.1.3.x PRIVATE MESSAGE).
++//
++// 38.423 defines the PRIVATE MESSAGE procedure precisely for vendor-specific information exchange
++// between NG-RAN nodes, but declares no private IEs itself, so the ASN.1 generator emitted an EMPTY
++// PrivateIE container. This header supplies a concrete, spec-conformant container:
++//   PrivateIE-Container ::= SEQUENCE (SIZE(1..65535)) OF PrivateIE-Field
++//   PrivateIE-Field     ::= { id PrivateIE-ID (local INTEGER 0..65535), criticality, value OPEN TYPE }
++// with ONE private IE: id local = KAIAIR_PKTR_SIGNAL_IE_ID, value = OCTET STRING carrying the
++// PktR-Signal record (per-link K, TX power, beta, ER, receiver-side RSRPs, pktR_CR §V).
++// Encoding follows the generator's own idioms exactly (private_ie_id_c / crit_e packers, open-type
++// length guard, unbounded_octstring), so peers running this build interoperate and any standard
++// XNAP decoder parses the envelope (and skips the private IE it does not know).
++
++#pragma once
++
++#include "ocudu/asn1/xnap/common.h"
++
++namespace asn1 {
++namespace xnap {
++
++/// Local PrivateIE-ID for the KaiAir PktR-Signal record (private numbering space, 0..65535).
++constexpr uint32_t KAIAIR_PKTR_SIGNAL_IE_ID = 0x4B41; // 'K''A'
++
++/// PrivateIE-Field carrying one OCTET STRING value.
++struct kaiair_private_ie_field_s {
++  private_ie_id_c           id;
++  crit_e                    crit;
++  unbounded_octstring<true> value;
++
++  OCUDUASN_CODE pack(bit_ref& bref) const
++  {
++    HANDLE_CODE(id.pack(bref));
++    HANDLE_CODE(crit.pack(bref));
++    {
++      varlength_field_pack_guard varlen_scope(bref, true); // OPEN TYPE: length-prefixed, aligned
++      HANDLE_CODE(value.pack(bref));
++    }
++    return OCUDUASN_SUCCESS;
++  }
++  OCUDUASN_CODE unpack(cbit_ref& bref)
++  {
++    HANDLE_CODE(id.unpack(bref));
++    HANDLE_CODE(crit.unpack(bref));
++    {
++      varlength_field_unpack_guard varlen_scope(bref, true);
++      HANDLE_CODE(value.unpack(bref));
++    }
++    return OCUDUASN_SUCCESS;
++  }
++  void to_json(json_writer& j) const
++  {
++    j.start_obj();
++    j.write_fieldname("id");
++    id.to_json(j);
++    j.write_str("criticality", crit.to_string());
++    j.write_str("value", value.to_string());
++    j.end_obj();
++  }
++};
++
++/// PrivateIE-Container used by PrivateMessage (replaces the generator's empty placeholder).
++struct kaiair_private_ie_container_l : public dyn_seq_of<kaiair_private_ie_field_s, 1, 65535, true> {
++  using base_t = dyn_seq_of<kaiair_private_ie_field_s, 1, 65535, true>;
++  using base_t::base_t;
++  void to_json(json_writer& j) const { asn1::to_json(j, static_cast<const dyn_array<kaiair_private_ie_field_s>&>(*this)); }
++};
++
++} // namespace xnap
++} // namespace asn1
+diff --git a/include/ocudu/asn1/xnap/xnap_pdu_contents.h b/include/ocudu/asn1/xnap/xnap_pdu_contents.h
+index 9ed778a943..e897e28e8c 100644
+--- a/include/ocudu/asn1/xnap/xnap_pdu_contents.h
++++ b/include/ocudu/asn1/xnap/xnap_pdu_contents.h
+@@ -5293,7 +5293,9 @@ struct private_ie_container_empty_l {
+   OCUDUASN_CODE unpack(cbit_ref& bref);
+   void          to_json(json_writer& j) const;
+ };
+-using private_msg_ies_container = private_ie_container_empty_l;
++// KaiAir/PktR: concrete private IE container for the PktR-Signal exchange (see kaiair_private_ies.h).
++#include "ocudu/asn1/xnap/kaiair_private_ies.h"
++using private_msg_ies_container = kaiair_private_ie_container_l;
+ 
+ // PrivateMessage ::= SEQUENCE
+ struct private_msg_s {
+diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
+index 260d0a3b6d..415498af91 100644
+--- a/include/ocudu/kaiair/pktr_neighbor_store.h
++++ b/include/ocudu/kaiair/pktr_neighbor_store.h
+@@ -124,24 +124,76 @@ public:
+     if (f == nullptr) {
+       return;
+     }
++    std::string text;
++    char        buf[4096];
++    size_t      n = 0;
++    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
++      text.append(buf, n);
++    }
++    std::fclose(f);
++    // The file is a full snapshot of ALL peers (written by the UDP bus): replace wholesale.
++    std::map<uint16_t, peer_cell> fresh = parse_peer_records(text);
++    std::lock_guard<std::mutex> lk(m_);
++    peers_ = std::move(fresh);
++  }
++
++  /// Ingest ONE peer's record received over XNAP (PRIVATE MESSAGE payload, same text format).
++  /// Replaces that peer's entry only; other peers are untouched. Returns the number of cells parsed.
++  size_t ingest_peer_record(const std::string& text)
++  {
++    std::map<uint16_t, peer_cell> cells = parse_peer_records(text);
++    std::lock_guard<std::mutex>   lk(m_);
++    for (auto& [pci, c] : cells) {
++      peers_[pci] = std::move(c);
++    }
++    ++nof_xn_records_;
++    return cells.size();
++  }
++
++  /// Our OWN record, refreshed by the DU tick and read by the XNAP sender (same process).
++  void        set_own_record(std::string text)
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    own_record_ = std::move(text);
++  }
++  std::string own_record() const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    return own_record_;
++  }
++  uint64_t nof_xn_records() const
++  {
++    std::lock_guard<std::mutex> lk(m_);
++    return nof_xn_records_;
++  }
++
++  /// Parse the flat record format (see refresh_peers_from_file) from memory.
++  static std::map<uint16_t, peer_cell> parse_peer_records(const std::string& text)
++  {
+     std::map<uint16_t, peer_cell> fresh;
+-    char line[512];
+-    while (std::fgets(line, sizeof(line), f) != nullptr) {
++    size_t                        pos = 0;
++    while (pos < text.size()) {
++      size_t      nl   = text.find('\n', pos);
++      std::string line = text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
++      pos              = (nl == std::string::npos) ? text.size() : nl + 1;
++      if (line.empty()) {
++        continue;
++      }
+       char     kind[8] = {0};
+       unsigned pci = 0;
+-      if (std::sscanf(line, "%7s %u", kind, &pci) != 2) {
++      if (std::sscanf(line.c_str(), "%7s %u", kind, &pci) != 2) {
+         continue;
+       }
+       peer_cell& c = fresh[static_cast<uint16_t>(pci)];
+       c.pci        = static_cast<uint16_t>(pci);
+       if (std::strcmp(kind, "cell") == 0) {
+         double ts = 0.0;
+-        std::sscanf(line, "%*s %*u %f %lf", &c.ssb_pwr_dbm, &ts);
++        std::sscanf(line.c_str(), "%*s %*u %f %lf", &c.ssb_pwr_dbm, &ts);
+         c.ts = ts;
+       } else if (std::strcmp(kind, "link") == 0) {
+         peer_link l;
+         unsigned  rnti = 0, er = 0;
+-        if (std::sscanf(line, "%*s %*u %x %f %f %f %u %f", &rnti, &l.k_db, &l.tx_pwr_dbm, &l.beta, &er,
++        if (std::sscanf(line.c_str(), "%*s %*u %x %f %f %f %u %f", &rnti, &l.k_db, &l.tx_pwr_dbm, &l.beta, &er,
+                         &l.signal_rx_dbm) >= 4) {
+           l.rnti    = static_cast<uint16_t>(rnti);
+           l.er_size = er;
+@@ -150,7 +202,7 @@ public:
+       } else if (std::strcmp(kind, "rxpwr") == 0) {
+         unsigned rnti = 0, from = 0;
+         float    v    = 0.0F;
+-        if (std::sscanf(line, "%*s %*u %x %u %f", &rnti, &from, &v) == 3) {
++        if (std::sscanf(line.c_str(), "%*s %*u %x %u %f", &rnti, &from, &v) == 3) {
+           for (peer_link& l : c.links) {
+             if (l.rnti == static_cast<uint16_t>(rnti)) {
+               l.rx_pwr_from_pci_dbm[static_cast<uint16_t>(from)] = v;
+@@ -159,9 +211,7 @@ public:
+         }
+       }
+     }
+-    std::fclose(f);
+-    std::lock_guard<std::mutex> lk(m_);
+-    peers_ = std::move(fresh);
++    return fresh;
+   }
+ 
+   // ---------------------------------------------------------------- consumers
+@@ -260,6 +310,8 @@ private:
+   std::map<uint16_t, peer_cell>       peers_;
+   long long                           last_peer_refresh_ms_ = 0;
+   uint64_t                            nof_reports_          = 0;
++  uint64_t                            nof_xn_records_       = 0;
++  std::string                         own_record_;
+ };
+ 
+ /// Process-wide instance (one gNB process = one cell on this bench).
+diff --git a/include/ocudu/kaiair/pktr_xn_signal.h b/include/ocudu/kaiair/pktr_xn_signal.h
+new file mode 100644
+index 0000000000..518a73c555
+--- /dev/null
++++ b/include/ocudu/kaiair/pktr_xn_signal.h
+@@ -0,0 +1,47 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, PktR-Signal over XNAP PRIVATE MESSAGE (3GPP-carried inter-gNB exchange).
++// Builds/parses the XNAP PDU that carries one cell's PktR record (the same flat text format the
++// neighbor store parses). Used by xnap_impl: a periodic sender publishes our own record on every
++// Xn association; the receiver ingests peers' records into the neighbor store.
++
++#pragma once
++
++#include "ocudu/asn1/xnap/kaiair_private_ies.h"
++#include "ocudu/asn1/xnap/xnap.h"
++#include "ocudu/xnap/xnap_message.h"
++#include <string>
++
++namespace ocudu {
++namespace kaiair {
++
++/// PRIVATE MESSAGE (initiating message, procedure code 22, criticality ignore) with one KaiAir IE.
++inline ocucp::xnap_message build_pktr_signal_private_message(const std::string& record)
++{
++  ocucp::xnap_message msg;
++  msg.pdu.set_init_msg();
++  msg.pdu.init_msg().load_info_obj(ASN1_XNAP_ID_PRIVATE_MSG);
++  auto& pm = msg.pdu.init_msg().value.private_msg();
++  asn1::xnap::kaiair_private_ie_field_s f;
++  f.id.set_local() = asn1::xnap::KAIAIR_PKTR_SIGNAL_IE_ID;
++  f.crit           = asn1::crit_e::ignore;
++  f.value          = byte_buffer::create(record.begin(), record.end()).value();
++  pm.private_ies.push_back(f);
++  return msg;
++}
++
++/// Extract the KaiAir record from a received PRIVATE MESSAGE; empty string if none present.
++inline std::string parse_pktr_signal_private_message(const asn1::xnap::private_msg_s& pm)
++{
++  for (const auto& f : pm.private_ies) {
++    if (f.id.type().value == asn1::xnap::private_ie_id_c::types_opts::local &&
++        f.id.local() == asn1::xnap::KAIAIR_PKTR_SIGNAL_IE_ID) {
++      return std::string(f.value.begin(), f.value.end());
++    }
++  }
++  return {};
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/kaiair/pktr_er_controller.h b/lib/scheduler/kaiair/pktr_er_controller.h
+index 9a52863fe0..37ee0b1614 100644
+--- a/lib/scheduler/kaiair/pktr_er_controller.h
++++ b/lib/scheduler/kaiair/pktr_er_controller.h
+@@ -24,8 +24,10 @@
+ #include "pktr_ipc.h"
+ #include "pktr_runtime_config.h"
+ #include <cstdint>
++#include <cstdio>
+ #include <cstdlib>
+ #include <map>
++#include <string>
+ #include <memory>
+ #include <vector>
+ 
+@@ -160,6 +162,28 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+     snap->masks[id]   = std::move(m);
+   }
+   gate_table().publish(std::move(snap));
++
++  // 5. Our PktR-Signal record for the inter-gNB plane (XNAP PRIVATE MESSAGE sender in the CU-CP
++  //    reads it from the store; the UDP bus reads the same content from the metrics JSON).
++  {
++    std::string rec = "cell " + std::to_string(my_pci) + " " + std::to_string(s.ssb_pwr_dbm) + " " +
++                      std::to_string(now) + "\n";
++    for (size_t i = 0; i < out.ues.size(); ++i) {
++      const er_ue_result& r = out.ues[i];
++      if (!r.live) {
++        continue;
++      }
++      char buf[160];
++      std::snprintf(buf, sizeof(buf), "link %u %04x %.2f %.2f %.3f %u %.2f\n", my_pci, r.rnti, r.k_db,
++                    s.ssb_pwr_dbm - ues[i].dl_shed_db, ues[i].beta, r.er_size, r.serv_rsrp_dbm);
++      rec += buf;
++      for (const auto& [pci, v] : r.nbr_rsrp_dbm) {
++        std::snprintf(buf, sizeof(buf), "rxpwr %u %04x %u %.2f\n", my_pci, r.rnti, pci, v);
++        rec += buf;
++      }
++    }
++    store.set_own_record(std::move(rec));
++  }
+   return out;
+ }
+ 
+diff --git a/lib/xnap/xnap_impl.cpp b/lib/xnap/xnap_impl.cpp
+index 9f2e05c42f..b056af03e2 100644
+--- a/lib/xnap/xnap_impl.cpp
++++ b/lib/xnap/xnap_impl.cpp
+@@ -3,6 +3,8 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "xnap_impl.h"
++#include "ocudu/kaiair/pktr_neighbor_store.h" // KaiAir/PktR: neighbor store (peer records)
++#include "ocudu/kaiair/pktr_xn_signal.h"      // KaiAir/PktR: PktR-Signal <-> PRIVATE MESSAGE
+ #include "log_helpers.h"
+ #include "procedures/sn_status_transfer_asn1_helpers.h"
+ #include "procedures/xn_handover_asn1_helpers.h"
+@@ -39,10 +41,46 @@ xnap_impl::xnap_impl(xnc_peer_index_t          xnc_index_,
+   ctrl_exec(ctrl_exec_),
+   xn_setup_outcome(timer_factory{timers, ctrl_exec})
+ {
++  // KaiAir/PktR: arm the periodic PktR-Signal publisher (500 ms, PRKS slow-timescale plane).
++  // Sends only once the Xn association is up (peer context known) and a record exists.
++  kaiair_signal_timer = timer_factory{timers, ctrl_exec}.create_timer();
++  kaiair_signal_timer.set(std::chrono::milliseconds{500}, [this](timer_id_t /*tid*/) {
++    kaiair_send_pktr_signal();
++    kaiair_signal_timer.run(); // re-arm (periodic)
++  });
++  kaiair_signal_timer.run();
++}
++
++void xnap_impl::kaiair_send_pktr_signal()
++{
++  if (!peer_ctxt.has_value()) {
++    return;
++  }
++  const std::string rec = kaiair::neighbor_store().own_record();
++  if (rec.empty()) {
++    return;
++  }
++  if (!tx_notifier.on_new_message(kaiair::build_pktr_signal_private_message(rec))) {
++    logger.debug("KaiAir: cannot send PktR-Signal PRIVATE MESSAGE (association down?)");
++    return;
++  }
++  ++kaiair_signals_sent;
++}
++
++void xnap_impl::handle_kaiair_private_message(const asn1::xnap::private_msg_s& msg)
++{
++  const std::string rec = kaiair::parse_pktr_signal_private_message(msg);
++  if (rec.empty()) {
++    logger.debug("PRIVATE MESSAGE without a KaiAir IE ignored");
++    return;
++  }
++  const size_t cells = kaiair::neighbor_store().ingest_peer_record(rec);
++  logger.debug("KaiAir: PktR-Signal received over Xn ({} cell record(s), {} bytes)", cells, rec.size());
+ }
+ 
+ async_task<void> xnap_impl::stop()
+ {
++  kaiair_signal_timer.stop(); // KaiAir/PktR
+   // Stop XN setup procedure if in progress.
+   xn_setup_outcome.stop();
+   return launch_no_op_task();
+@@ -100,6 +138,9 @@ void xnap_impl::handle_initiating_message(const init_msg_s& msg)
+     case xnap_elem_procs_o::init_msg_c::types_opts::ue_context_release:
+       handle_ue_context_release(msg.value.ue_context_release());
+       break;
++    case xnap_elem_procs_o::init_msg_c::types_opts::private_msg:
++      handle_kaiair_private_message(msg.value.private_msg()); // KaiAir/PktR inter-gNB signal
++      break;
+     default:
+       logger.error("Initiating message of type {} is not supported", msg.value.type().to_string());
+   }
+diff --git a/lib/xnap/xnap_impl.h b/lib/xnap/xnap_impl.h
+index e863e8878a..9816903a60 100644
+--- a/lib/xnap/xnap_impl.h
++++ b/lib/xnap/xnap_impl.h
+@@ -12,6 +12,7 @@
+ #include "ocudu/xnap/xnap.h"
+ #include "ocudu/xnap/xnap_configuration.h"
+ #include "ocudu/xnap/xnap_message.h"
++#include "ocudu/support/timers.h" // KaiAir/PktR: periodic PktR-Signal sender over Xn
+ 
+ namespace ocudu::ocucp {
+ 
+@@ -101,6 +102,14 @@ private:
+ 
+   /// XN Setup Response/Failure Event Source.
+   protocol_transaction_event_source<asn1::xnap::xn_setup_resp_s, asn1::xnap::xn_setup_fail_s> xn_setup_outcome;
++
++  // KaiAir/PktR: 3GPP-carried inter-gNB coordination (PRIVATE MESSAGE, TS 38.423). A periodic timer
++  // publishes this cell's PktR-Signal record (from the process-wide neighbor store, refreshed by
++  // the DU tick) on this Xn association; received records are ingested into the same store.
++  void         kaiair_send_pktr_signal();
++  void         handle_kaiair_private_message(const asn1::xnap::private_msg_s& msg);
++  unique_timer kaiair_signal_timer;
++  uint64_t     kaiair_signals_sent = 0;
+ };
+ 
+ } // namespace ocudu::ocucp
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index c9a7227c48..d4e2095740 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -38,3 +38,6 @@ add_test(pktr_conflict_graph_test pktr_conflict_graph_test)
+ add_executable(pktr_slot_gate_test pktr_slot_gate_test.cpp)
+ target_link_libraries(pktr_slot_gate_test ocudulog gtest gtest_main)
+ add_test(pktr_slot_gate_test pktr_slot_gate_test)
++add_executable(pktr_xn_signal_test pktr_xn_signal_test.cpp)
++target_link_libraries(pktr_xn_signal_test xnap_asn1 ocudu_support ocudulog gtest gtest_main)
++add_test(pktr_xn_signal_test pktr_xn_signal_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_xn_signal_test.cpp b/tests/unittests/scheduler/kaiair/pktr_xn_signal_test.cpp
+new file mode 100644
+index 0000000000..e086f79de8
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_xn_signal_test.cpp
+@@ -0,0 +1,65 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "ocudu/kaiair/pktr_neighbor_store.h"
++#include "ocudu/kaiair/pktr_xn_signal.h"
++#include "ocudu/asn1/xnap/xnap.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++static const std::string kRecord = "cell 7 16.00 123.000\n"
++                                   "link 7 4601 8.50 20.00 0.350 1 -78.00\n"
++                                   "rxpwr 7 4601 2 -84.00\n"
++                                   "rxpwr 7 4601 3 -95.00\n";
++
++// PRIVATE MESSAGE with the KaiAir private IE packs and unpacks to the same bytes/record (PER).
++TEST(pktr_xn_signal_test, private_message_round_trip)
++{
++  ocucp::xnap_message tx = build_pktr_signal_private_message(kRecord);
++  ASSERT_EQ(tx.pdu.type().value, asn1::xnap::xn_ap_pdu_c::types_opts::init_msg);
++  ASSERT_EQ(tx.pdu.init_msg().proc_code, ASN1_XNAP_ID_PRIVATE_MSG);
++
++  byte_buffer     buf;
++  asn1::bit_ref   bref(buf);
++  ASSERT_EQ(tx.pdu.pack(bref), asn1::OCUDUASN_SUCCESS);
++  ASSERT_GT(buf.length(), kRecord.size());
++
++  asn1::xnap::xn_ap_pdu_c rx;
++  asn1::cbit_ref          cbref(buf);
++  ASSERT_EQ(rx.unpack(cbref), asn1::OCUDUASN_SUCCESS);
++  ASSERT_EQ(rx.type().value, asn1::xnap::xn_ap_pdu_c::types_opts::init_msg);
++  ASSERT_EQ(rx.init_msg().value.type().value, asn1::xnap::xnap_elem_procs_o::init_msg_c::types_opts::private_msg);
++  EXPECT_EQ(parse_pktr_signal_private_message(rx.init_msg().value.private_msg()), kRecord);
++}
++
++// A PRIVATE MESSAGE carrying an unknown private IE yields an empty record (ignored, not an error).
++TEST(pktr_xn_signal_test, foreign_private_ie_ignored)
++{
++  ocucp::xnap_message tx = build_pktr_signal_private_message(kRecord);
++  auto&               pm = tx.pdu.init_msg().value.private_msg();
++  pm.private_ies[0].id.set_local() = 0x1234;
++  EXPECT_TRUE(parse_pktr_signal_private_message(pm).empty());
++}
++
++// The received record lands in the neighbor store as that peer's entry only.
++TEST(pktr_xn_signal_test, ingest_into_store)
++{
++  pktr_neighbor_store st;
++  EXPECT_EQ(st.ingest_peer_record(kRecord), 1U);
++  auto peers = st.peers();
++  ASSERT_EQ(peers.count(7), 1U);
++  ASSERT_EQ(peers[7].links.size(), 1U);
++  EXPECT_FLOAT_EQ(peers[7].links[0].k_db, 8.5F);
++  EXPECT_FLOAT_EQ(peers[7].links[0].rx_pwr_from_pci_dbm.at(3), -95.0F);
++  // A second peer's record does not disturb the first.
++  EXPECT_EQ(st.ingest_peer_record("cell 2 16.00 124.000\nlink 2 4602 3.00 20.00 0.100 0 -80.00\n"), 1U);
++  peers = st.peers();
++  EXPECT_EQ(peers.size(), 2U);
++  EXPECT_EQ(peers[7].links.size(), 1U);
++  EXPECT_EQ(st.nof_xn_records(), 2U);
++  // Own-record outbox.
++  st.set_own_record("cell 9 16.00 1.000\n");
++  EXPECT_EQ(st.own_record(), "cell 9 16.00 1.000\n");
++}

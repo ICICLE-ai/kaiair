@@ -1,0 +1,103 @@
+From 09f1c8b4e1f21c918e7d8f30bb66ba5e0db14ea7 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 24 Jun 2026 11:57:11 -0500
+Subject: [PATCH 06/52] kaiair: surface maintained interference EWMA (I_R,
+ sigma) into metrics + view
+
+The scheduler metrics handler now keeps a persistent per-UE pktr_link_state (across report
+periods, unlike the per-period 'data' accumulator), fed from the same per-packet CRC SINR/RSRP.
+compute_report() exports the EWMA mean (I_R) and std (sigma) of the receiver interference+noise
+into scheduler_ue_metrics, and the KaiAir feedback view prints them as 'PktR state'. This is the
+smoothed interference the IPC power controller will consume (Phase 2), distinct from the
+instantaneous per-report NI. Display only; scheduler tests 112/112 unchanged.
+---
+ .../metrics/consumers/kaiair_pktr_metrics_view.cpp       | 9 +++++++++
+ include/ocudu/scheduler/scheduler_metrics.h              | 7 +++++++
+ lib/scheduler/logging/scheduler_metrics_handler.cpp      | 8 ++++++++
+ lib/scheduler/logging/scheduler_metrics_handler.h        | 3 +++
+ 4 files changed, 27 insertions(+)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 1e9ee188dc..6dcf106d3f 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -81,5 +81,14 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+     } else if (has_snr) {
+       fmt::print("    gNB-measured UL: PUSCH SINR={:.1f} dB  (RSRP n/a this interval)\n", ue.pusch_snr_db);
+     }
++
++    // ---- maintained interference state (the smoothed values the control loop actually uses) ----
++    if (ue.pktr_nof_ni_samples > 0) {
++      fmt::print("    PktR state     : I_R (EWMA mean NI) = {:.1f} dB, sigma_NI = {:.2f} dB   over {} packets   "
++                 "[the Cantelli inputs]\n",
++                 ue.pktr_mean_ni_db,
++                 ue.pktr_std_ni_db,
++                 ue.pktr_nof_ni_samples);
++    }
+   }
+ }
+diff --git a/include/ocudu/scheduler/scheduler_metrics.h b/include/ocudu/scheduler/scheduler_metrics.h
+index 4b5d9d50c7..399a14669a 100644
+--- a/include/ocudu/scheduler/scheduler_metrics.h
++++ b/include/ocudu/scheduler/scheduler_metrics.h
+@@ -42,6 +42,13 @@ struct scheduler_ue_metrics {
+   float pusch_snr_db;
+   /// RSRP in dB estimated for the PUSCH.
+   float pusch_rsrp_db;
++  /// KaiAir/PktR: number of per-packet UL measurements folded into the interference EWMA so far.
++  uint64_t pktr_nof_ni_samples = 0;
++  /// KaiAir/PktR: EWMA mean of the receiver interference+noise NI = RSRP - SINR (dB). Valid when
++  /// pktr_nof_ni_samples > 0. This is PktR's I_R, the Cantelli power-control input.
++  float pktr_mean_ni_db = 0.0F;
++  /// KaiAir/PktR: EWMA standard deviation of NI (dB), the interference part of the Cantelli sigma.
++  float pktr_std_ni_db = 0.0F;
+   /// SNR in dB estimated for the PUCCH.
+   float pucch_snr_db;
+   /// Average MCS index used for UL grants.
+diff --git a/lib/scheduler/logging/scheduler_metrics_handler.cpp b/lib/scheduler/logging/scheduler_metrics_handler.cpp
+index 1ecce04279..f66acc4ba7 100644
+--- a/lib/scheduler/logging/scheduler_metrics_handler.cpp
++++ b/lib/scheduler/logging/scheduler_metrics_handler.cpp
+@@ -160,6 +160,10 @@ void cell_metrics_handler::handle_crc_indication(slot_point                   sl
+       ++u.data.nof_pusch_rsrp_reports;
+       u.data.sum_pusch_rsrp += crc_pdu.ul_rsrp_dBFS.value();
+     }
++    // KaiAir/PktR: fold this per-packet UL measurement into the persistent interference EWMA.
++    if (crc_pdu.ul_sinr_dB.has_value() && crc_pdu.ul_rsrp_dBFS.has_value()) {
++      u.pktr_link_state.push_ul_measurement(crc_pdu.ul_sinr_dB.value(), crc_pdu.ul_rsrp_dBFS.value());
++    }
+     if (crc_pdu.tb_crc_success) {
+       u.data.sum_ul_tb_bytes += tbs.value();
+     }
+@@ -607,6 +611,10 @@ cell_metrics_handler::ue_metric_context::compute_report(std::chrono::millisecond
+   ret.pusch_snr_db        = data.nof_pusch_snr_reports > 0 ? data.sum_pusch_snrs / data.nof_pusch_snr_reports : 0;
+   ret.pusch_rsrp_db       = data.nof_pusch_rsrp_reports > 0 ? data.sum_pusch_rsrp / data.nof_pusch_rsrp_reports
+                                                             : -std::numeric_limits<float>::infinity();
++  // KaiAir/PktR: maintained interference EWMA (persistent across reports).
++  ret.pktr_nof_ni_samples = pktr_link_state.nof_samples();
++  ret.pktr_mean_ni_db     = pktr_link_state.mean_ni_db();
++  ret.pktr_std_ni_db      = pktr_link_state.std_ni_db();
+   ret.ul_ri_stats         = data.ul_ri;
+   ret.pucch_snr_db        = data.nof_pucch_snr_reports > 0 ? data.sum_pucch_snrs / data.nof_pucch_snr_reports : 0;
+   ret.last_dl_olla        = last_dl_olla;
+diff --git a/lib/scheduler/logging/scheduler_metrics_handler.h b/lib/scheduler/logging/scheduler_metrics_handler.h
+index 3b048d9507..5308563de1 100644
+--- a/lib/scheduler/logging/scheduler_metrics_handler.h
++++ b/lib/scheduler/logging/scheduler_metrics_handler.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include "../kaiair/pktr_link_state.h" // KaiAir/PktR per-link interference statistics
+ #include "scheduler_metrics_ue_configurator.h"
+ #include "ocudu/adt/flat_map.h"
+ #include "ocudu/adt/slotted_array.h"
+@@ -103,6 +104,8 @@ class cell_metrics_handler final : public sched_metrics_ue_configurator
+     std::array<unsigned, MAX_NOF_RB_LCIDS> last_dl_bs{0};
+     std::optional<float>                   last_dl_olla;
+     std::optional<float>                   last_ul_olla;
++    /// KaiAir/PktR interference statistics, persistent across reports (its EWMA must keep memory).
++    kaiair::pktr_link_state                pktr_link_state;
+     non_persistent_data                    data;
+ 
+     scheduler_ue_metrics compute_report(std::chrono::milliseconds metric_report_period, unsigned nof_slots_per_sf);

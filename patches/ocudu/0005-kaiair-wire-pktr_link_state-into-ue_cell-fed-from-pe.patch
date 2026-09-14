@@ -1,0 +1,66 @@
+From 01b0bd0438887b77602e3267707dc8390022f34d Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 24 Jun 2026 11:38:20 -0500
+Subject: [PATCH 05/52] kaiair: wire pktr_link_state into ue_cell, fed from
+ per-packet UL CRC
+
+ue_cell now owns a pktr_link_state (by value, one per UE-per-cell link) and feeds it
+from handle_crc_pdu() alongside the existing PUSCH-SNR update, whenever a CRC carries
+both ul_sinr_dB and ul_rsrp_dBFS. The maintained EWMA interference mean/variance is the
+input the IPC power controller will read (Phase 2). Display/consumption only added later;
+no behavior change. Scheduler unit tests 112/112 unchanged; pktr_link_state_test 7/7.
+---
+ lib/scheduler/ue_context/ue_cell.cpp | 6 ++++++
+ lib/scheduler/ue_context/ue_cell.h   | 8 ++++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/lib/scheduler/ue_context/ue_cell.cpp b/lib/scheduler/ue_context/ue_cell.cpp
+index b9d10f1eeb..0e6840db90 100644
+--- a/lib/scheduler/ue_context/ue_cell.cpp
++++ b/lib/scheduler/ue_context/ue_cell.cpp
+@@ -181,6 +181,12 @@ expected<units::bytes> ue_cell::handle_crc_pdu(slot_point pusch_slot, const ul_c
+     // Update PUSCH SNR reported from PHY.
+     if (crc_pdu.ul_sinr_dB.has_value()) {
+       components.channel_state->update_pusch_snr(crc_pdu.ul_sinr_dB.value());
++
++      // KaiAir/PktR: feed the per-link interference statistics with this per-packet UL measurement.
++      // Needs both SINR and RSRP to derive the receiver interference+noise NI = RSRP - SINR.
++      if (crc_pdu.ul_rsrp_dBFS.has_value()) {
++        pktr_link_state_.push_ul_measurement(crc_pdu.ul_sinr_dB.value(), crc_pdu.ul_rsrp_dBFS.value());
++      }
+     }
+   }
+ 
+diff --git a/lib/scheduler/ue_context/ue_cell.h b/lib/scheduler/ue_context/ue_cell.h
+index 2351f9e5aa..78f460d48d 100644
+--- a/lib/scheduler/ue_context/ue_cell.h
++++ b/lib/scheduler/ue_context/ue_cell.h
+@@ -6,6 +6,7 @@
+ 
+ #include "../cell/cell_harq_manager.h"
+ #include "../config/ue_configuration.h"
++#include "../kaiair/pktr_link_state.h" // KaiAir/PktR per-link interference statistics
+ #include "../support/pucch_power_controller.h"
+ #include "../support/pusch_power_controller.h"
+ #include "ue_channel_state_manager.h"
+@@ -174,6 +175,10 @@ public:
+   pucch_power_controller&       get_pucch_power_controller() { return *components.pucch_pwr_controller; }
+   const pucch_power_controller& get_pucch_power_controller() const { return *components.pucch_pwr_controller; }
+ 
++  /// \brief KaiAir/PktR per-link interference statistics (fed from per-packet UL measurements).
++  kaiair::pktr_link_state&       get_pktr_link_state() { return pktr_link_state_; }
++  const kaiair::pktr_link_state& get_pktr_link_state() const { return pktr_link_state_; }
++
+   /// \brief Returns an estimated DL rate in bytes per slot based on the given input parameters.
+   double get_estimated_dl_rate(const pdsch_config_params& pdsch_cfg, sch_mcs_index mcs, unsigned nof_prbs) const;
+   /// \brief Returns an estimated UL rate in bytes per slot based on the given input parameters.
+@@ -199,6 +204,9 @@ private:
+   ue_cell_components                components;
+   ocudulog::basic_logger&           logger;
+ 
++  /// KaiAir/PktR per-link interference statistics, owned by value (one per UE-per-cell link).
++  kaiair::pktr_link_state pktr_link_state_;
++
+   /// \brief Whether cell is currently active.
+   bool active = true;
+ 

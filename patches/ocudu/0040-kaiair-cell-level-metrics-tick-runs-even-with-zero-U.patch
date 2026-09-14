@@ -1,0 +1,65 @@
+From 82413a1f86198f548e912056593710fe5cec5473 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 14:32:37 -0500
+Subject: [PATCH 40/52] kaiair: cell-level metrics tick runs even with zero UEs
+ (JSON, ER controller, Xn record)
+
+---
+ .../metrics/consumers/kaiair_pktr_metrics_view.cpp     | 10 +++++++++-
+ .../metrics/consumers/kaiair_pktr_metrics_view.h       |  3 +++
+ .../metrics/consumers/scheduler_metrics_consumers.cpp  |  4 ++++
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 2b49cf874d..d12fca1d17 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -256,7 +256,7 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+ {
+   // Co-design telemetry egress (no-op unless KAIAIR_PKTR_METRICS_JSON is set).
+-  emit_pktr_metrics_json(cell);
++  // (metrics JSON + ER tick now run per cell from pktr_cell_metrics_tick(), even with 0 UEs)
+ 
+   bool printed_header = false;
+ 
+@@ -457,3 +457,11 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+     }
+   }
+ }
++
++// KaiAir/PktR: cell-level tick, metrics JSON + ER/K/conflict controller + own PktR-Signal record.
++// Called by the stdout consumer for EVERY cell, including cells with no UE, so a gNB keeps
++// publishing its record over Xn and serving the GUI while idle.
++void kaiair::pktr_cell_metrics_tick(const scheduler_cell_metrics& cell)
++{
++  emit_pktr_metrics_json(cell);
++}
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h
+index c85b6dd1c6..d87a5fa126 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.h
+@@ -21,5 +21,8 @@ bool pktr_metrics_enabled();
+ /// Print, for each UE in the cell, the PktR-relevant feedback and its PktR usage.
+ void print_pktr_feedback(const scheduler_cell_metrics& cell);
+ 
++/// KaiAir/PktR: per-cell tick (metrics JSON, ER controller, own Xn record), runs even with 0 UEs.
++void pktr_cell_metrics_tick(const scheduler_cell_metrics& cell);
++
+ } // namespace kaiair
+ } // namespace ocudu
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp
+index a4bde22fb7..41a0b8b8b5 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/scheduler_metrics_consumers.cpp
+@@ -42,6 +42,10 @@ void scheduler_cell_metrics_consumer_stdout::handle_metric(const std::optional<s
+   }
+ 
+   for (const auto& cell : report->cells) {
++    // KaiAir/PktR: cell-level tick BEFORE the no-UE skip (metrics JSON, ER controller, Xn record).
++    if (kaiair::pktr_metrics_enabled()) {
++      kaiair::pktr_cell_metrics_tick(cell);
++    }
+     if (cell.ue_metrics.empty()) {
+       continue;
+     }

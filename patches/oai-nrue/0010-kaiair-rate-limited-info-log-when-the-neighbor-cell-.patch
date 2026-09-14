@@ -1,0 +1,33 @@
+From 14c88fb7b8b1405c2963ab4620220f41905cd3ad Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 15:39:06 -0500
+Subject: [PATCH 10/12] kaiair: rate-limited info log when the neighbor-cell
+ PSS search fails
+
+---
+ openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+index 0a34914067..7dd2c5ca3f 100644
+--- a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
++++ b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+@@ -301,6 +301,18 @@ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
+   if (!pss_res.success) {
+     if (neighboring_cell_info->valid_meas)
+       neighboring_cell_info->consec_fail++;
++    // KaiAir: neighbor-search visibility (rate-limited), the multi-cell exclusion region needs these
++    // measurements, so a silent PSS failure must be diagnosable without PHY debug logging.
++    static unsigned kaiair_nbr_fail_count = 0;
++    if ((kaiair_nbr_fail_count++ % 50) == 0)
++      LOG_I(NR_PHY,
++            "[KaiAir nbr-meas] PSS search failed for PCI=%d (start=%d len=%d peak=%d dB avg=%d dB) fails=%u\n",
++            known_pci,
++            neighboring_cell_info->pss_search_start,
++            length,
++            pss_res.peak,
++            pss_res.avg,
++            kaiair_nbr_fail_count);
+     LOG_D(NR_PHY,
+           "PSS validation failed for PCI=%d (search window: start=%d, length=%d, peak=%d dB, avg=%d dB), consec_fail=%d\n",
+           known_pci,

@@ -1,0 +1,150 @@
+From 97343509d9d8074efbd35e7221e90c873652b000 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 12 Sep 2026 00:23:36 -0500
+Subject: [PATCH 50/52] kaiair: ONAMA airtime fix, slot-contention set excludes
+ own-cell links and the other TDD direction (onama_conflict_set); 2-cell
+ mutual conflict now yields the correct emergent ~1/2 share (was ~1/3 via the
+ phantom own-UL/DL entry); share stays 1/(|set|+1) so a 3rd cell automatically
+ moves links to ~1/3
+
+---
+ lib/scheduler/kaiair/pktr_conflict_graph.h    | 28 +++++++++
+ lib/scheduler/kaiair/pktr_er_controller.h     |  6 +-
+ .../kaiair/pktr_conflict_graph_test.cpp       | 57 +++++++++++++++++++
+ 3 files changed, 89 insertions(+), 2 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_conflict_graph.h b/lib/scheduler/kaiair/pktr_conflict_graph.h
+index 2ae3757adf..c29a0f08e1 100644
+--- a/lib/scheduler/kaiair/pktr_conflict_graph.h
++++ b/lib/scheduler/kaiair/pktr_conflict_graph.h
+@@ -102,6 +102,34 @@ public:
+     return out;
+   }
+ 
++  /// KaiAir ONAMA slot-contention set: the subset of M_i that can actually contend with link
++  /// \p id for the SAME slot. In a synchronized-TDD deployment UL and DL occupy disjoint slots
++  /// (the TDD pattern separates them), and links of the SAME cell are arbitrated by that cell's
++  /// own scheduler (PRB allocation), not by slot muting. Counting those as ONAMA competitors
++  /// created phantom entries: a 2-cell mutual conflict ran at 1/3 airtime each (own-UL + peer in
++  /// the set) instead of 1/2, idling ~1/3 of slots. Nothing here is hardcoded to a cell count, 
++  /// the share stays emergent (~1/(|set|+1)); adding a 3rd interfering cell automatically moves
++  /// each link to ~1/3, a 4th to ~1/4, etc.
++  std::vector<uint32_t> onama_conflict_set(uint32_t id) const
++  {
++    std::vector<uint32_t> out;
++    auto it = links_.find(id);
++    if (it == links_.end()) {
++      return out;
++    }
++    const uint32_t my_dir = id >> 31;              // link_dir encoded in bit 31 (make_link_id)
++    const uint32_t my_pci = (id >> 16) & 0x7FFFU;  // cell in bits 16..30
++    for (const auto& [oid, ol] : links_) {
++      if ((oid >> 31) != my_dir || ((oid >> 16) & 0x7FFFU) == my_pci) {
++        continue; // other direction (disjoint TDD slots) or same cell (scheduler arbitrates)
++      }
++      if (links_conflict(it->second, ol)) {
++        out.push_back(oid);
++      }
++    }
++    return out;
++  }
++
+   /// All conflicting pairs (id_a < id_b).
+   std::vector<std::pair<uint32_t, uint32_t>> conflict_pairs() const
+   {
+diff --git a/lib/scheduler/kaiair/pktr_er_controller.h b/lib/scheduler/kaiair/pktr_er_controller.h
+index eb426202c6..45cf88d6ec 100644
+--- a/lib/scheduler/kaiair/pktr_er_controller.h
++++ b/lib/scheduler/kaiair/pktr_er_controller.h
+@@ -266,7 +266,9 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+       continue;
+     }
+     const uint32_t id = make_link_id(my_pci, r.rnti, link_dir::dl);
+-    r.conflicts       = graph.conflict_set(id);
++    // KaiAir ONAMA airtime fix: mask/telemetry use the slot-contention set (same-direction,
++    // other-cell), see onama_conflict_set. Full conflict_set() kept for graph analytics.
++    r.conflicts       = graph.onama_conflict_set(id);
+     link_slot_mask m  = compute_link_mask(id, now_slot, window, r.conflicts, kaiair_glob_base);
+     r.active_fraction = active_fraction(m);
+     snap->masks[id]   = std::move(m);
+@@ -277,7 +279,7 @@ inline er_tick_result er_controller_tick(uint16_t                        my_pci,
+       continue;
+     }
+     const uint32_t id           = make_link_id(my_pci, r.rnti, link_dir::ul);
+-    const auto     ul_conflicts = graph.conflict_set(id);
++    const auto     ul_conflicts = graph.onama_conflict_set(id); // KaiAir ONAMA airtime fix (same rationale as DL)
+     r.ul_conflict_count         = static_cast<unsigned>(ul_conflicts.size());
+     link_slot_mask m            = compute_link_mask(id, now_slot, window, ul_conflicts, kaiair_glob_base);
+     r.ul_active_fraction        = active_fraction(m);
+diff --git a/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp b/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp
+index 4635811439..06e6acff1f 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_conflict_graph_test.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ 
+ #include "lib/scheduler/kaiair/pktr_conflict_graph.h"
++#include "lib/scheduler/kaiair/pktr_slot_gate.h"
+ #include <gtest/gtest.h>
+ 
+ using namespace ocudu;
+@@ -76,3 +77,59 @@ TEST(pktr_conflict_graph_test, graph_conflict_sets_and_pairs)
+   EXPECT_EQ(g.conflict_set(c.id).size(), 0U);
+   EXPECT_EQ(g.conflict_pairs().size(), 1U);
+ }
++
++// KaiAir ONAMA airtime fix: the slot-contention set excludes own-cell links and the other
++// direction; the airtime share stays EMERGENT (2 cells -> 1 competitor -> ~1/2; 3 cells -> 2 ->
++// ~1/3) with nothing hardcoded to a cell count.
++TEST(pktr_conflict_graph, onama_conflict_set_excludes_same_cell_and_other_direction)
++{
++  pktr_conflict_graph g;
++  auto mk = [](uint16_t pci, uint16_t rnti, link_dir d, float k) {
++    cg_link l;
++    l.id            = make_link_id(pci, rnti, d);
++    l.tx            = d == link_dir::dl ? node_id{pci, 0} : node_id{pci, rnti};
++    l.rx            = d == link_dir::dl ? node_id{pci, rnti} : node_id{pci, 0};
++    l.dir           = d;
++    l.k_db          = k;
++    l.signal_rx_dbm = -90.0F;
++    return l;
++  };
++  // Cell 7: UE 0x11 with both directions; cell 2 and cell 3: one UL link each, all mutually in ER.
++  cg_link a_ul = mk(7, 0x11, link_dir::ul, 20.0F);
++  cg_link a_dl = mk(7, 0x11, link_dir::dl, 20.0F);
++  cg_link b_ul = mk(2, 0x22, link_dir::ul, 20.0F);
++  cg_link c_ul = mk(3, 0x33, link_dir::ul, 20.0F);
++  // Everyone hears everyone else's transmitter above S - K (mutual ER).
++  a_ul.rx_pwr_from_dbm[{2, 0x22}] = -80.0F;
++  a_ul.rx_pwr_from_dbm[{3, 0x33}] = -80.0F;
++  b_ul.rx_pwr_from_dbm[{7, 0x11}] = -80.0F;
++  b_ul.rx_pwr_from_dbm[{3, 0x33}] = -80.0F;
++  c_ul.rx_pwr_from_dbm[{7, 0x11}] = -80.0F;
++  c_ul.rx_pwr_from_dbm[{2, 0x22}] = -80.0F;
++
++  // 2-cell world: exactly ONE competitor (peer UL) -> expected share ~1/2.
++  g.add_link(a_ul);
++  g.add_link(a_dl);
++  g.add_link(b_ul);
++  auto set2 = g.onama_conflict_set(a_ul.id);
++  ASSERT_EQ(set2.size(), 1U);
++  EXPECT_EQ(set2[0], b_ul.id);
++  // The full graph set still contains the own-DL shared-node edge (analytics unchanged).
++  EXPECT_GT(g.conflict_set(a_ul.id).size(), set2.size());
++
++  // 3rd cell joins: the SAME call now returns 2 competitors -> share drops to ~1/3 emergently.
++  g.add_link(c_ul);
++  auto set3 = g.onama_conflict_set(a_ul.id);
++  EXPECT_EQ(set3.size(), 2U);
++
++  // Airtime check over a window: with 2 competitors the win fraction is ~1/3 (binomial tolerance).
++  unsigned wins = 0;
++  const unsigned window = 3000;
++  for (unsigned s = 0; s < window; ++s) {
++    if (onama_active(1000000 + s, a_ul.id, set3)) {
++      ++wins;
++    }
++  }
++  const float frac = static_cast<float>(wins) / window;
++  EXPECT_NEAR(frac, 1.0F / 3.0F, 0.05F);
++}

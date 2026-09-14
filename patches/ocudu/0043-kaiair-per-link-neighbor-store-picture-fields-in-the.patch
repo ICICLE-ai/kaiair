@@ -1,0 +1,53 @@
+From 312491363fa90b4d365d497007d159f6d3c7a02c Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 16:15:06 -0500
+Subject: [PATCH 43/52] kaiair: per-link neighbor-store picture fields in the
+ metrics JSON (bring-up visibility)
+
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp       | 16 +++++++++++++++-
+ .../cell_meas_manager/cell_meas_manager_impl.cpp |  4 ++--
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index a2754ea6bd..186d1b51c0 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -104,7 +104,21 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+     const kaiair::er_ue_result& r = er.ues[i];
+     j += first_link ? "" : ",";
+     first_link = false;
+-    j += fmt::format(R"({{"rnti":"{:#06x}","live":{},"dl_k_db":{:.2f},"dl_er":{},"dl_tx_dbm":{:.1f},"beta":{:.3f},)"
++    {
++      // Bring-up visibility: what the neighbor store holds for this UE (any age).
++      const auto pic = kaiair::neighbor_store().ue_picture(er_in[i].rnti);
++      float      newest_age = -1.0F;
++      for (const auto& [pci, smp] : pic.neighbors) {
++        const float age = static_cast<float>(kaiair::wall_now_s() - smp.ts);
++        newest_age      = newest_age < 0.0F ? age : std::min(newest_age, age);
++      }
++      j += fmt::format(R"({{"store_serv_pci":{},"store_serv_rsrp_dbm":{:.1f},"store_nbrs":{},"store_age_s":{:.1f},)",
++                       pic.serving_pci,
++                       std::isfinite(pic.serving.rsrp_dbm) ? pic.serving.rsrp_dbm : -999.0F,
++                       pic.neighbors.size(),
++                       newest_age);
++    }
++    j += fmt::format(R"("rnti":"{:#06x}","live":{},"dl_k_db":{:.2f},"dl_er":{},"dl_tx_dbm":{:.1f},"beta":{:.3f},)"
+                      R"("serv_rsrp_dbm":{:.1f},"e_max_dbm":{:.1f},"conflicts":{},"active_frac":{:.3f},"nbr_rsrp_dbm":{{)",
+                      er_in[i].rnti,
+                      r.live ? "true" : "false",
+diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+index 80ccaaf778..823269c530 100644
+--- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
++++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+@@ -379,8 +379,8 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
+           nb += fmt::format(" pci{}={:.0f}dBm", pci, v);
+         }
+         logger.info("[KaiAir map] ue={} rnti={:#x} serving pci{} RSRP={} neighbors:{} (report #{})",
+-                    ue_index,
+-                    kaiair_ue->get_c_rnti(),
++                    fmt::underlying(ue_index),
++                    static_cast<unsigned>(kaiair_ue->get_c_rnti()),
+                     kaiair_pci,
+                     kaiair_serv.has_value() ? fmt::format("{:.0f}dBm", kaiair_serv_dbm) : std::string("n/a"),
+                     nb.empty() ? std::string(" none") : nb,

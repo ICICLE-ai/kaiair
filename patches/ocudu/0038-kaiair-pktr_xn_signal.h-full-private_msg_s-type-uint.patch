@@ -1,0 +1,32 @@
+From 34e0531e67f3b43c46385efc7104fbb8c50556b8 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 14:05:33 -0500
+Subject: [PATCH 38/52] kaiair: pktr_xn_signal.h, full private_msg_s type,
+ uint8_t iterators for byte_buffer::create
+
+---
+ include/ocudu/kaiair/pktr_xn_signal.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/include/ocudu/kaiair/pktr_xn_signal.h b/include/ocudu/kaiair/pktr_xn_signal.h
+index 518a73c555..d7e55c841b 100644
+--- a/include/ocudu/kaiair/pktr_xn_signal.h
++++ b/include/ocudu/kaiair/pktr_xn_signal.h
+@@ -10,6 +10,7 @@
+ 
+ #include "ocudu/asn1/xnap/kaiair_private_ies.h"
+ #include "ocudu/asn1/xnap/xnap.h"
++#include "ocudu/asn1/xnap/xnap_pdu_contents.h"
+ #include "ocudu/xnap/xnap_message.h"
+ #include <string>
+ 
+@@ -26,7 +27,8 @@ inline ocucp::xnap_message build_pktr_signal_private_message(const std::string&
+   asn1::xnap::kaiair_private_ie_field_s f;
+   f.id.set_local() = asn1::xnap::KAIAIR_PKTR_SIGNAL_IE_ID;
+   f.crit           = asn1::crit_e::ignore;
+-  f.value          = byte_buffer::create(record.begin(), record.end()).value();
++  const uint8_t* p = reinterpret_cast<const uint8_t*>(record.data());
++  f.value          = byte_buffer::create(p, p + record.size()).value();
+   pm.private_ies.push_back(f);
+   return msg;
+ }

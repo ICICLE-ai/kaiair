@@ -1,0 +1,327 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>KaiAir Live</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb; --page: #f9f9f7;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+    --s-ulsinr: #2a78d6; --s-rsrp: #eb6834; --s-dlsinr: #1baf7a; --s-bler: #4a3aa7;
+    --target: #d03b3b; --good: #0ca30c; --crit: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19; --page: #0d0d0d;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+      --s-ulsinr: #3987e5; --s-rsrp: #d95926; --s-dlsinr: #199e70; --s-bler: #9085e9;
+      --target: #e66767; --good: #0ca30c; --crit: #d03b3b;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--page); color: var(--ink);
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; padding: 16px; }
+  h1 { font-size: 18px; font-weight: 650; }
+  .sub { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .tile, .card, .ctl {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
+  }
+  .tile { padding: 10px 14px; min-width: 108px; }
+  .tile .k { color: var(--muted); font-size: 11px; }
+  .tile .v { font-size: 22px; font-weight: 650; margin-top: 2px; }
+  .tile .u { font-size: 12px; color: var(--ink-2); font-weight: 400; }
+  .card { padding: 12px 14px; flex: 1 1 420px; min-width: 380px; }
+  .card h2 { font-size: 13px; font-weight: 600; color: var(--ink-2); display:flex; justify-content:space-between; }
+  .card h2 .now { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .ctl { padding: 12px 16px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .ctl label { font-size: 13px; color: var(--ink-2); }
+  .switch { position: relative; width: 46px; height: 26px; appearance: none; background: var(--axis);
+            border-radius: 13px; cursor: pointer; transition: background .15s; outline-offset: 2px; }
+  .switch:checked { background: var(--good); }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+                   border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch:checked::after { left: 23px; }
+  input[type=range] { width: 160px; accent-color: var(--s-ulsinr); }
+  button { background: var(--s-ulsinr); color: #fff; border: 0; border-radius: 7px;
+           padding: 7px 14px; font-size: 13px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.up    { background: color-mix(in srgb, var(--good) 15%, transparent);  color: var(--good); }
+  .pill.down  { background: color-mix(in srgb, var(--crit) 15%, transparent);  color: var(--crit); }
+  .pill.busy  { background: color-mix(in srgb, var(--s-rsrp) 18%, transparent); color: var(--s-rsrp); }
+  svg text { font-family: inherit; }
+  .tip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--ring);
+         border-radius: 7px; padding: 6px 9px; font-size: 12px; display: none; z-index: 5;
+         box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+</style>
+
+<h1>KaiAir Live</h1>
+
+<div class="row" id="tiles"></div>
+
+<div class="row ctl">
+  <span id="linkpill" class="pill down">link:, </span>
+  <label style="display:flex;align-items:center;gap:8px">
+    <input type="checkbox" class="switch" id="powerSw"> KaiAir power control
+  </label>
+  <label style="display:flex;align-items:center;gap:8px">
+    γ UL <input type="range" id="gammaSl" min="0" max="30" step="0.5" value="5">
+    <b id="gammaVal" style="min-width:34px">5.0</b>
+    <button id="gammaBtn">Set</button>
+  </label>
+  <label style="display:flex;align-items:center;gap:8px">
+    γ DL <input type="range" id="dlGammaSl" min="0" max="30" step="0.5" value="10">
+    <b id="dlGammaVal" style="min-width:34px">10.0</b>
+    <button id="dlGammaBtn">Set</button>
+  </label>
+  <label style="display:flex;align-items:center;gap:8px">
+    <input type="checkbox" class="switch" id="ldpSw"> LDP
+    D <input type="range" id="ldpMs" min="10" max="100" step="10" value="10" style="width:120px">
+    <b id="ldpMsVal" style="min-width:30px">10</b> ms
+    <button id="ldpBtn">Set</button>
+  </label>
+  <label style="display:none;align-items:center;gap:8px">
+    ER gate <select id="erGate"><option value="off">off</option><option value="observe">observe</option><option value="enforce">enforce</option></select>
+  </label>
+  <span id="busy" class="pill busy" style="display:none"></span>
+</div>
+
+<div class="row">
+  <div class="card"><h2>UL PUSCH SINR <span id="sat" style="font-weight:400;color:var(--ink)"></span>
+      <span class="now" id="now-sinr">, </span></h2>
+    <svg id="ch-sinr" width="100%" height="170"></svg></div>
+  <div class="card" style="display:none"><h2><span id="dlsinr-title">DL PDSCH SINR (UE reported)</span> <span id="dlsat" style="font-weight:400;color:var(--ink)"></span>
+      <span class="now" id="now-dlsinr">, </span></h2>
+    <svg id="ch-dlsinr" width="100%" height="170"></svg></div>
+  <div class="card"><h2>UL throughput (Mbps) <span class="now" id="now-ulmbps">, </span></h2>
+    <svg id="ch-ulmbps" width="100%" height="170"></svg></div>
+</div>
+
+<!-- KaiAir multi-cell coordination (PRKS/PktR): shown only when the gNB publishes link records. -->
+<div class="row" id="mc-row" style="display:none">
+  <div class="card"><h2>Exclusion region K (dB) <span id="mc-info" style="font-weight:400;color:var(--ink)"></span>
+      <span class="now" id="now-k">, </span></h2>
+    <svg id="ch-k" width="100%" height="160"></svg></div>
+  <div class="card"><h2>Cell coordination <span class="now" id="now-gate">, </span></h2>
+    <table id="mc-table" style="width:100%;font-size:13px;border-collapse:collapse"></table></div>
+</div>
+<div class="row" style="display:none">
+  <div class="card"><h2>UL LDP delivery <span id="ldp-ul-info" style="font-weight:400;color:var(--ink)"></span>
+      <span class="now" id="now-ldp-ul">, </span></h2>
+    <svg id="ch-ldp-ul" width="100%" height="160"></svg></div>
+  <div class="card"><h2>DL LDP delivery <span id="ldp-dl-info" style="font-weight:400;color:var(--ink)"></span>
+      <span class="now" id="now-ldp-dl">, </span></h2>
+    <svg id="ch-ldp-dl" width="100%" height="160"></svg></div>
+</div>
+<div class="row">
+  <div class="card"><h2>UL power RSRP <span class="now" id="now-rsrp">, </span></h2>
+    <svg id="ch-rsrp" width="100%" height="160"></svg></div>
+  <div class="card" style="display:none"><h2>DL power shed from ceiling (dB) <span class="now" id="now-dlshed">, </span></h2>
+    <svg id="ch-dlshed" width="100%" height="160"></svg></div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let DATA = { history: [], state: {} };
+
+const TILES = [
+  ["ni_dbfs", "Noise+Interf", "dBFS"],
+  ["ul_mbps", "UL", "Mbps"], ["dl_mbps", "DL", "Mbps"],
+];
+function fmt(v, d = 1) { return v == null ? ", " : (+v).toFixed(d); }
+
+function tiles() {
+  const last = { ...(DATA.history.at(-1) || {}) };
+  $("tiles").innerHTML = TILES.map(([k, name, unit]) =>
+    `<div class="tile"><div class="k">${name}</div><div class="v">${fmt(last[k], 1)}` +
+    (unit ? ` <span class="u">${unit}</span>` : "") + `</div></div>`).join("");
+}
+
+function chart(svgId, key, colorVar, opts = {}) {
+  const svg = $(svgId), W = svg.clientWidth, H = svg.clientHeight;
+  const ML = 42, MR = 10, MT = 8, MB = 18;
+  const hist = DATA.history;
+  const pts = hist.map((h, i) => [i, h[key]]).filter(p => p[1] != null);
+  let inner = "";
+  if (pts.length > 1) {
+    const tgt = opts.target ? hist.map((h, i) => [i, h[opts.target]]).filter(p => p[1] != null) : [];
+    const op  = opts.opmean ? hist.map((h, i) => [i, h[opts.opmean]]).filter(p => p[1] != null) : [];
+    const ys = pts.map(p => p[1]).concat(tgt.map(p => p[1])).concat(op.map(p => p[1]));
+    let y0 = Math.floor(Math.min(...ys) - 1), y1 = Math.ceil(Math.max(...ys) + 1);
+    if (opts.min0) y0 = Math.min(0, y0);
+    const X = i => ML + (W - ML - MR) * i / Math.max(hist.length - 1, 1);
+    const Y = v => MT + (H - MT - MB) * (y1 - v) / Math.max(y1 - y0, 1e-9);
+    const step = Math.max(1, Math.round((y1 - y0) / 4));
+    for (let g = y0; g <= y1; g += step)
+      inner += `<line x1="${ML}" x2="${W - MR}" y1="${Y(g)}" y2="${Y(g)}" stroke="var(--grid)" stroke-width="1"/>` +
+               `<text x="${ML - 6}" y="${Y(g) + 4}" font-size="10" fill="var(--muted)" text-anchor="end">${g}</text>`;
+    if (op.length > 1)
+      inner += `<path d="M${op.map(p => X(p[0]) + "," + Y(p[1])).join("L")}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="4,4"/>`;
+    if (tgt.length > 1) {
+      inner += `<path d="M${tgt.map(p => X(p[0]) + "," + Y(p[1])).join("L")}" fill="none" stroke="var(--target)" stroke-width="2"/>`;
+      // Label the red target line so it's self-explanatory to an audience: γ (the SINR target).
+      const gv = tgt[tgt.length - 1][1];
+      inner += `<text x="${W - MR - 3}" y="${Y(gv) - 5}" font-size="12" font-weight="600" fill="var(--target)" text-anchor="end">γ = ${gv} dB</text>`;
+    }
+    inner += `<path d="M${pts.map(p => X(p[0]) + "," + Y(p[1])).join("L")}" fill="none" stroke="var(${colorVar})" stroke-width="2" stroke-linejoin="round"/>`;
+    const lp = pts.at(-1);
+    inner += `<circle cx="${X(lp[0])}" cy="${Y(lp[1])}" r="4" fill="var(${colorVar})" stroke="var(--surface)" stroke-width="2"/>`;
+    svg.dataset.meta = JSON.stringify({ ML, MR, key, target: opts.target || null, opmean: opts.opmean || null });
+  }
+  inner += `<line x1="${ML}" x2="${W - MR}" y1="${H - MB}" y2="${H - MB}" stroke="var(--axis)"/>`;
+  svg.innerHTML = inner;
+}
+
+function draw() {
+  tiles();
+  chart("ch-sinr", "ul_sinr_db", "--s-ulsinr", { target: "gamma_db" });
+  chart("ch-ulmbps", "ul_mbps", "--s-ulsinr", { min0: true });
+  // Live beta-satisfaction over the visible window: fraction of samples with SINR >= gamma.
+  const pairs = DATA.history.filter(h => h.ul_sinr_db != null && h.gamma_db != null);
+  if (pairs.length > 10) {
+    const sat = pairs.filter(h => h.ul_sinr_db >= h.gamma_db).length / pairs.length;
+    $("sat").textContent = `P(SINR≥γ) = ${(100 * sat).toFixed(0)}% (β target 90%)`;
+  } else { $("sat").textContent = ""; }
+  chart("ch-rsrp", "ul_rsrp_dbfs", "--s-rsrp");
+  // DL SINR: prefer the the dissertation's TRUE UE-reported SINR when the feedback chain is live; fall back to
+  // the parked CQI-derived estimate. Red line = the DL gamma target (per-direction, own slider).
+  const hasTrueDl = DATA.history.some(h => h.dl_sinr_true_db != null);
+  const dlKey = hasTrueDl ? "dl_sinr_true_db" : "dl_sinr_est_db";
+  $("dlsinr-title").textContent = hasTrueDl ? "DL PDSCH SINR (UE reported)" : "DL PDSCH SINR (CQI-derived)";
+  chart("ch-dlsinr", dlKey, "--s-dlsinr", { target: "dl_gamma_db" });
+  // Live beta-satisfaction for DL, mirroring the UL header stat.
+  const dlPairs = DATA.history.filter(h => h[dlKey] != null && h.dl_gamma_db != null);
+  if (dlPairs.length > 10) {
+    const dlSat = dlPairs.filter(h => h[dlKey] >= h.dl_gamma_db).length / dlPairs.length;
+    $("dlsat").textContent = `P(SINR≥γ) = ${(100 * dlSat).toFixed(0)}% (β target 90%)`;
+  } else { $("dlsat").textContent = ""; }
+  // DL power actuator: shed-from-ceiling dB (0 = full power), the DL mirror of the UL RSRP panel.
+  chart("ch-dlshed", "dl_pwr_shed_db", "--s-bler", { min0: true });
+  // LDP delivery view, one panel per direction: on-time % (solid) vs the pkt-beta target line
+  // (red, e.g. 90%). Classification runs against the same deadline whether LDP is on or off, so
+  // flipping the LDP toggle is the with/without comparison.
+  for (const h of DATA.history) h.__ldp_target = h.ldp_pkt_beta != null ? 100 * h.ldp_pkt_beta : null;
+  chart("ch-ldp-ul", "ldp_ul_ontime_pct", "--s-ulsinr", { target: "__ldp_target", min0: true });
+  chart("ch-ldp-dl", "ldp_dl_ontime_pct", "--s-dlsinr", { target: "__ldp_target", min0: true });
+  const last = DATA.history.at(-1) || {};
+  // Multi-cell panel: K of the first live DL link (the victim-side GRK output) + coordination facts.
+  if (last.links !== undefined && (last.peer_cells || 0) > 0) {
+    $("mc-row").style.display = "";
+    for (const h of DATA.history) {
+      const l = (h.links || []).find(x => x.live);
+      h.__k = l ? l.dl_k_db : null;
+    }
+    chart("ch-k", "__k", "--s-dlsinr", { min0: true });
+    const l0 = (last.links || []).find(x => x.live) || {};
+    $("now-k").textContent = fmt(l0.dl_k_db) + " dB";
+    $("mc-info").textContent = `ER ${l0.dl_er ?? ", "} · conflicts ${l0.conflicts ?? ", "} · active ${l0.active_frac != null ? (100 * l0.active_frac).toFixed(0) + "%" : ", "}`;
+    $("now-gate").textContent = `${last.er_gate || ", "} · peers ${last.peer_cells ?? 0}`;
+    const nbr = l0.nbr_rsrp_dbm ? Object.entries(l0.nbr_rsrp_dbm).map(([p, v]) => `PCI ${p}: ${fmt(v)} dBm`).join(" · ") : ", ";
+    const rows = [
+      ["Peer cells (Xn / bus)", last.peer_cells ?? 0], ["Peer links", last.peer_links ?? 0],
+      ["Serving RSRP", fmt(l0.serv_rsrp_dbm) + " dBm"], ["Neighbor RSRP", nbr],
+      ["E_max tolerable I", fmt(l0.e_max_dbm) + " dBm"], ["DL TX power", fmt(l0.dl_tx_dbm) + " dBm"],
+      ["Gate muted / allowed", `${last.gate_muted ?? 0} / ${last.gate_allowed ?? 0}`],
+    ];
+    $("mc-table").innerHTML = rows.map(r => `<tr><td style="color:var(--muted);padding:3px 0">${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join("");
+  } else {
+    $("mc-row").style.display = "none";   // single cell / no peers: hide the coordination panels
+  }
+
+  const ldpInfo = last.ldp_deadline_ms != null
+      ? `D = ${fmt(last.ldp_deadline_ms, 0)} ms · LDP ${last.ldp_on ? "ON" : "off"}` : "";
+  $("ldp-ul-info").textContent = ldpInfo ? ldpInfo + ` · avg tx ${fmt(last.ldp_ul_avg_tx, 2)}` : "";
+  $("ldp-dl-info").textContent = ldpInfo ? ldpInfo + ` · avg tx ${fmt(last.ldp_dl_avg_tx, 2)}` : "";
+  $("now-ldp-ul").textContent = fmt(last.ldp_ul_ontime_pct, 0) + " %";
+  $("now-ldp-dl").textContent = fmt(last.ldp_dl_ontime_pct, 0) + " %";
+  $("now-dlshed").textContent = fmt(last.dl_pwr_shed_db) + " dB";
+  $("now-sinr").textContent = fmt(last.ul_sinr_db) + " dB";
+  $("now-ulmbps").textContent = fmt(last.ul_mbps, 2) + " Mbps";
+  $("now-rsrp").textContent = fmt(last.ul_rsrp_dbfs) + " dBFS";
+  $("now-dlsinr").textContent = fmt(hasTrueDl ? last.dl_sinr_true_db : last.dl_sinr_est_db) + " dB";
+  const st = DATA.state;
+  if (st.er_gate && document.activeElement !== $("erGate")) $("erGate").value = st.er_gate;
+  // Honest state: the gNB is "up" when telemetry is fresh; a UE is "connected" only when the
+  // metrics carry an active C-RNTI. Green = UE attached; amber = gNB up but no UE; red = gNB down.
+  const gnbUp = st.link === "up";
+  const ueOn = !!st.ue;
+  $("linkpill").textContent = !gnbUp ? "gNB down" : (ueOn ? "UE connected" : "gNB up · no UE");
+  $("linkpill").className = "pill " + (!gnbUp ? "down" : (ueOn ? "up" : "busy"));
+  if (document.activeElement !== $("powerSw")) $("powerSw").checked = !!st.power;
+  // Slider follows the LIVE gamma (the bench truth) unless the user is adjusting it.
+  if (st.gamma != null && document.activeElement !== $("gammaSl")) {
+    $("gammaSl").value = st.gamma;
+    $("gammaVal").textContent = (+st.gamma).toFixed(1);
+  }
+  if (st.dl_gamma != null && document.activeElement !== $("dlGammaSl")) {
+    $("dlGammaSl").value = st.dl_gamma;
+    $("dlGammaVal").textContent = (+st.dl_gamma).toFixed(1);
+  }
+  if (st.ldp_ms != null && document.activeElement !== $("ldpSw")) $("ldpSw").checked = true;
+  if (st.ldp_ms == null && document.activeElement !== $("ldpSw")) $("ldpSw").checked = false;
+  // Deadline slider follows the LIVE value (bench truth) unless the user is adjusting it.
+  if (st.ldp_ms != null && document.activeElement !== $("ldpMs")) {
+    $("ldpMs").value = st.ldp_ms;
+    $("ldpMsVal").textContent = (+st.ldp_ms).toFixed(0);
+  }
+  $("busy").style.display = st.busy ? "" : "none";
+  $("busy").textContent = st.busy;
+}
+
+async function poll() {
+  try {
+    DATA = await (await fetch("/api/data")).json();
+    draw();
+  } catch (e) { /* server briefly away */ }
+  setTimeout(poll, 1000);
+}
+poll();
+addEventListener("resize", draw);
+
+// ---- hover tooltip (crosshair on nearest sample) ----
+for (const id of ["ch-sinr", "ch-ulmbps", "ch-rsrp", "ch-dlsinr", "ch-dlshed", "ch-ldp-ul", "ch-ldp-dl"]) {
+  $(id).addEventListener("mousemove", ev => {
+    const svg = ev.currentTarget, meta = svg.dataset.meta && JSON.parse(svg.dataset.meta);
+    if (!meta || !DATA.history.length) return;
+    const r = svg.getBoundingClientRect();
+    const frac = (ev.clientX - r.left - meta.ML) / (r.width - meta.ML - meta.MR);
+    const i = Math.max(0, Math.min(DATA.history.length - 1, Math.round(frac * (DATA.history.length - 1))));
+    const h = DATA.history[i];
+    const lastw = (DATA.history.at(-1) || {}).wall || 0;
+    const ago = Math.round(lastw - (h.wall || lastw));
+    let txt = `<b>t−${ago}s</b><br>${meta.key}: ${fmt(h[meta.key])}`;
+    if (meta.target) txt += `<br>γ target: ${fmt(h[meta.target])}`;
+    const tip = $("tip");
+    tip.innerHTML = txt;
+    tip.style.display = "block";
+    tip.style.left = (ev.clientX + 14) + "px";
+    tip.style.top = (ev.clientY + 10) + "px";
+  });
+  $(id).addEventListener("mouseleave", () => $("tip").style.display = "none");
+}
+
+// ---- controls ----
+$("gammaSl").oninput = () => $("gammaVal").textContent = (+$("gammaSl").value).toFixed(1);
+$("gammaBtn").onclick = () =>
+  fetch("/api/target", { method: "POST", body: JSON.stringify({ db: +$("gammaSl").value }) });
+$("dlGammaSl").oninput = () => $("dlGammaVal").textContent = (+$("dlGammaSl").value).toFixed(1);
+$("dlGammaBtn").onclick = () =>
+  fetch("/api/dltarget", { method: "POST", body: JSON.stringify({ db: +$("dlGammaSl").value }) });
+$("powerSw").onchange = () =>
+  fetch("/api/power", { method: "POST", body: JSON.stringify({ on: $("powerSw").checked }) });
+// LDP: live ctrl-file control, takes effect in ~1 s, no gNB restart. The toggle switches LDP
+// on/off at the slider's deadline; Set applies a new deadline immediately while LDP is on.
+const postLdp = () =>
+  fetch("/api/ldp", { method: "POST", body: JSON.stringify({ on: $("ldpSw").checked, deadline_ms: +$("ldpMs").value }) });
+$("erGate").onchange = () =>
+  fetch("/api/ergate", { method: "POST", body: JSON.stringify({ mode: $("erGate").value }) });
+$("ldpMs").oninput = () => $("ldpMsVal").textContent = $("ldpMs").value;
+$("ldpSw").onchange = postLdp;
+$("ldpBtn").onclick = postLdp;
+</script>

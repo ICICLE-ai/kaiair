@@ -1,0 +1,118 @@
+From 1d2e2086da83ec147ba8cd0a26a2f53e0cbd1c5a Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 27 Jun 2026 22:10:48 -0500
+Subject: [PATCH 10/52] kaiair: T2.2a diagnostics, KAIAIR_PKTR_DEBUG_TPC;
+ proves UL loop is open at OAI UE
+
+Add rate-limited TPC-loop instrumentation to pusch_power_controller (gated by
+KAIAIR_PKTR_DEBUG_TPC): the gating booleans and the regulation math. Used it to
+diagnose why IPC-UL actuation produced no SINR change on hardware.
+
+Finding (decisive): the gNB side is complete and correct, the PktR cushion
+reaches the loop (offset=+2.x), the loop computes the right TPC, and dci_builder
+encodes it into the UL DCI (f0_0/f0_1.tpc_command). But the closed loop never
+converges: the gNB's f_cl accumulator runs away (-200 lowering, +532 raising)
+because the UE never responds. Root cause is in the OAI UE itself
+(nr_ue_scheduler.c): `delta_pusch = 0; // workaround for PHY not applying PUSCH
+tx power`, the OAI nrUE reads the DCI TPC then discards it, so its UL power is
+open-loop. => Tier-A UL-via-TPC cannot actuate against stock OAI on any
+setup/load; it needs a UE that applies UL power control (a modified-UE / Tier-B
+item). gNB-side IPC-UL is done.
+
+Verified: scheduler_test 100%, pktr tests pass, gnb links clean.
+---
+ lib/scheduler/kaiair/pktr_runtime_config.h    |  4 ++
+ .../support/pusch_power_controller.cpp        | 42 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index bc56626594..e99751f533 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -33,6 +33,9 @@ struct pktr_settings {
+   /// Whether PktR actuates UL power control (adds the Cantelli cushion to the stock SINR target).
+   /// Independent of \c enabled so the view and the actuation can be toggled separately for A/B.
+   bool actuate = false;
++  /// Whether to print UL closed-loop TPC diagnostics (KAIAIR_PKTR_DEBUG_TPC), shows whether the
++  /// loop is active, which gating branch it takes, and the regulation math. Rate-limited.
++  bool debug_tpc = false;
+   /// IPC parameters (gamma_db, beta, ewma_c).
+   pktr_config ipc{};
+   /// EWMA sigma (dB) above which the view treats the interval as a regime transition and suppresses
+@@ -68,6 +71,7 @@ inline pktr_settings load_pktr_settings()
+   pktr_settings s;
+   s.enabled            = env_flag("KAIAIR_PKTR_METRICS");
+   s.actuate            = env_flag("KAIAIR_PKTR_ACTUATE");
++  s.debug_tpc          = env_flag("KAIAIR_PKTR_DEBUG_TPC");
+   s.ipc.gamma_db       = env_float("KAIAIR_PKTR_GAMMA_DB", s.ipc.gamma_db);
+   s.ipc.beta           = std::clamp(env_float("KAIAIR_PKTR_BETA", s.ipc.beta), 0.0F, 0.999999F);
+   s.ipc.ewma_c         = std::clamp(env_float("KAIAIR_PKTR_EWMA_C", s.ipc.ewma_c), 0.0F, 0.999999F);
+diff --git a/lib/scheduler/support/pusch_power_controller.cpp b/lib/scheduler/support/pusch_power_controller.cpp
+index 075adc376d..57aa198922 100644
+--- a/lib/scheduler/support/pusch_power_controller.cpp
++++ b/lib/scheduler/support/pusch_power_controller.cpp
+@@ -4,8 +4,11 @@
+ 
+ #include "pusch_power_controller.h"
+ #include "../config/ue_configuration.h"
++#include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR: KAIAIR_PKTR_DEBUG_TPC diagnostics
+ #include "ocudu/ocudulog/ocudulog.h"
+ #include "ocudu/ran/power_control/tpc_mapping.h"
++#include "ocudu/ran/rnti.h"
++#include "fmt/format.h"
+ 
+ using namespace ocudu;
+ 
+@@ -149,6 +152,26 @@ uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot, float
+ {
+   static constexpr uint8_t default_tpc = 1;
+ 
++  // KaiAir/PktR: optional TPC-loop diagnostics (KAIAIR_PKTR_DEBUG_TPC=1), rate-limited to ~1/100 calls.
++  // The gating booleans show whether the closed loop is active and why it does/doesn't adjust power.
++  if (kaiair::pktr_runtime().debug_tpc) {
++    static unsigned kaiair_dbg_count = 0;
++    if ((kaiair_dbg_count++ % 100) == 0) {
++      const bool has_phr_data = latest_phr.has_value() and latest_phr.value().phr_data_for_pw_ctrl.has_value();
++      fmt::print("[KaiAir/PktR TPC] rnti={:#06x} cl_enabled={} pwr_ctrl_cfg={} pw_state={} phr={} phr_data={} "
++                 "meas_sinr={:.1f} base_target={:.1f} offset={:+.2f}\n",
++                 to_value(rnti),
++                 cl_pw_control_enabled,
++                 pusch_pwr_ctrl.has_value(),
++                 latest_pusch_pw_control.has_value(),
++                 latest_phr.has_value(),
++                 has_phr_data,
++                 channel_state_manager.get_pusch_average_sinr(),
++                 pusch_sinr_target_dB,
++                 pktr_sinr_target_offset_db);
++    }
++  }
++
+   if (not cl_pw_control_enabled or not pusch_pwr_ctrl.has_value() or not latest_pusch_pw_control.has_value()) {
+     static constexpr int default_f_cl_pw_control = 0;
+     latest_pusch_pw_control.emplace(pusch_pw_control{default_f_cl_pw_control, pusch_slot});
+@@ -205,6 +228,25 @@ uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot, float
+     tpc_command = 0;
+   }
+ 
++  // KaiAir/PktR: when the loop actually reaches the regulation math, log it (rate-limited).
++  if (kaiair::pktr_runtime().debug_tpc) {
++    static unsigned kaiair_reg_count = 0;
++    if ((kaiair_reg_count++ % 100) == 0) {
++      fmt::print("[KaiAir/PktR TPC] REGULATING rnti={:#06x} target={:.1f}(base {:.1f}{:+.2f}off)+fpl {:.2f} - meas "
++                 "{:.1f} = diff {:+.2f} -> tpc={} f_cl(pre)={} max_df={:.1f}\n",
++                 to_value(rnti),
++                 pusch_sinr_target_dB + pktr_sinr_target_offset_db,
++                 pusch_sinr_target_dB,
++                 pktr_sinr_target_offset_db,
++                 fract_pl_compensation,
++                 channel_state_manager.get_pusch_average_sinr(),
++                 sinr_to_target_diff,
++                 tpc_command,
++                 latest_pusch_pw_control.value().f_cl_pw_control,
++                 max_delta_f_cl_pw_control);
++    }
++  }
++
+   latest_pusch_pw_control.value().f_cl_pw_control += tpc_mapping(tpc_command);
+   latest_pusch_pw_control.value().latest_tpc_slot = pusch_slot;
+   return tpc_command;

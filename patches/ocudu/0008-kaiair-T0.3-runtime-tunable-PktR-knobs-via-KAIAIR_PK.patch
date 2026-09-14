@@ -1,0 +1,367 @@
+From 448570c72f65f611fccdc71507661572a5e17260 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 27 Jun 2026 16:36:47 -0500
+Subject: [PATCH 08/52] kaiair: T0.3, runtime-tunable PktR knobs via
+ KAIAIR_PKTR_* env
+
+Make gamma, beta, the interference-EWMA memory c, and the regime-transition
+sigma threshold tunable between gNB runs without recompiling, so beta/c can be
+swept on hardware. Defaults match pktr_config (gamma=3, beta=0.99, c=15/16,
+sigma_transient=6), so behavior is unchanged when nothing is set.
+
+- pktr_runtime_config.h (new): process-wide pktr_settings loaded once from
+  KAIAIR_PKTR_{METRICS,GAMMA_DB,BETA,EWMA_C,SIGMA_TRANSIENT_DB}, clamped to sane
+  ranges (beta,c in [0,1); sigma>=0). detail::load_pktr_settings() exposed for tests.
+- ue_cell + scheduler metrics handler: construct their pktr_link_state with the
+  configured EWMA c instead of the hardcoded default.
+- view: read gamma/beta/c/sigma-threshold from the runtime config (env flag now
+  delegates here too); print an active "[config]" line so the operating values
+  are visible in the feedback block.
+- pktr_runtime_config_test (new, 5 cases): defaults, parsing, bad-value fallback,
+  clamping, metrics-flag semantics.
+
+Chose env vars over a gNB-YAML section for this round because c is a
+scheduler-internal knob that a view-only YAML path can't reach without threading
+config through the scheduler-config plumbing; the YAML `pktr:` section is the
+planned productization (T0.3b) once good operating values are found.
+
+Verified on the ARA gNB container: pktr_{link_state,ipc,runtime_config}_test pass;
+scheduler_test 100% (no regression); gnb links clean.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 37 +++-----
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 84 +++++++++++++++++
+ .../logging/scheduler_metrics_handler.h       |  6 +-
+ lib/scheduler/ue_context/ue_cell.h            |  5 +-
+ .../unittests/scheduler/kaiair/CMakeLists.txt |  4 +
+ .../kaiair/pktr_runtime_config_test.cpp       | 92 +++++++++++++++++++
+ 6 files changed, 202 insertions(+), 26 deletions(-)
+ create mode 100644 lib/scheduler/kaiair/pktr_runtime_config.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index db245a2bfe..9a8f7910b0 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -2,23 +2,17 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ 
+ #include "kaiair_pktr_metrics_view.h"
+-#include "lib/scheduler/kaiair/pktr_ipc.h"
++#include "lib/scheduler/kaiair/pktr_runtime_config.h"
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
+ #include <cmath>
+-#include <cstdlib>
+-#include <string_view>
+ 
+ using namespace ocudu;
+ 
+ bool kaiair::pktr_metrics_enabled()
+ {
+-  // Evaluated once; enable with KAIAIR_PKTR_METRICS=1 in the gNB environment.
+-  static const bool enabled = []() {
+-    const char* e = std::getenv("KAIAIR_PKTR_METRICS");
+-    return e != nullptr && std::string_view(e) == "1";
+-  }();
+-  return enabled;
++  // Backed by the process-wide runtime settings (loaded once from KAIAIR_PKTR_METRICS).
++  return kaiair::pktr_runtime().enabled;
+ }
+ 
+ namespace {
+@@ -30,14 +24,6 @@ float cqi_to_sinr_db_estimate(float cqi)
+   return 1.9F * cqi - 5.0F;
+ }
+ 
+-/// EWMA sigma (dB) above which we treat the interval as a regime transition rather than steady
+-/// state. During a fast step in I+N the EWMA mean lags ~1/(1-c) samples, so every sample sits far
+-/// from the stale mean and the EWMA variance is inflated by that mean-lag, not by genuine
+-/// steady-state interference jitter. The Cantelli cushion (sigma*k(beta)) is not meaningful for
+-/// such an interval and would print an absurd power target. Observed link jitter is 0.2-2.6 dB;
+-/// transients reach 9-26 dB, so 6 dB cleanly separates them. Becomes a pktr_config knob in T0.3.
+-constexpr float sigma_transient_db = 6.0F;
+-
+ } // namespace
+ 
+ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+@@ -56,8 +42,15 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+     }
+ 
+     if (!printed_header) {
++      const kaiair::pktr_settings& s = kaiair::pktr_runtime();
+       fmt::print("\n[KaiAir/PktR] per-UE feedback (pci={}), what the UE reports to the gNB, and how PktR uses it:\n",
+                  cell.pci);
++      fmt::print("  [config] gamma={:.1f} dB  beta={:.3f} (k={:.2f})  ewma_c={:.4f}  sigma_transient={:.1f} dB\n",
++                 s.ipc.gamma_db,
++                 s.ipc.beta,
++                 kaiair::cantelli_sigma_factor(s.ipc.beta),
++                 s.ipc.ewma_c,
++                 s.sigma_transient_db);
+       printed_header = true;
+     }
+ 
+@@ -108,12 +101,12 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+       // power loop must drive the UL SINR to the deterministic margin gamma plus the Cantelli
+       // reliability cushion sigma*k(beta); the gap to the current SINR is the TPC command it would
+       // issue. E_max[I_R] is the interference headroom below the received signal level.
+-      const kaiair::pktr_config cfg; // defaults: gamma=3 dB, beta=0.99, c=15/16
+-      const float k          = kaiair::cantelli_sigma_factor(cfg.beta);
+-      const float cushion    = ue.pktr_std_ni_db * k;          // sigma*k(beta)
+-      const float sinr_targ  = cfg.gamma_db + cushion;         // required UL SINR for (gamma, beta)
++      const kaiair::pktr_config& cfg = kaiair::pktr_runtime().ipc; // gamma_db, beta, ewma_c (KAIAIR_PKTR_*)
++      const float k         = kaiair::cantelli_sigma_factor(cfg.beta);
++      const float cushion   = ue.pktr_std_ni_db * k;           // sigma*k(beta)
++      const float sinr_targ = cfg.gamma_db + cushion;          // required UL SINR for (gamma, beta)
+ 
+-      if (ue.pktr_std_ni_db > sigma_transient_db) {
++      if (ue.pktr_std_ni_db > kaiair::pktr_runtime().sigma_transient_db) {
+         // Mid regime-change: the EWMA variance is dominated by mean-lag, not steady-state jitter,
+         // so the Cantelli cushion is not valid. Flag it instead of printing an absurd power target.
+         fmt::print("    PktR IPC       : [regime transition] sigma={:.1f} dB >> link jitter -> EWMA variance "
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+new file mode 100644
+index 0000000000..c24d1df581
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -0,0 +1,84 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, process-wide runtime settings, loaded ONCE from the environment (T0.3).
++//
++// These are the research knobs for the PktR loops. They are read from KAIAIR_PKTR_* environment
++// variables at first use and cached, so they can be swept between gNB runs without recompiling:
++//
++//   KAIAIR_PKTR_METRICS            = 1            enable the PktR feedback view (as before)
++//   KAIAIR_PKTR_GAMMA_DB           = 3.0          required SINR margin gamma (dB)
++//   KAIAIR_PKTR_BETA               = 0.99         reliability target beta in (0,1); k=sqrt(b/(1-b))
++//   KAIAIR_PKTR_EWMA_C             = 0.9375       interference-EWMA memory c (15/16); agility knob
++//   KAIAIR_PKTR_SIGMA_TRANSIENT_DB = 6.0          sigma above which an interval is a regime transition
++//
++// Defaults match pktr_config. The gNB-YAML `pktr:` section is the planned productization (T0.3b),
++// once good operating values are found; until then the env path keeps c (a scheduler-internal knob)
++// tunable without threading config through the scheduler-config plumbing.
++
++#pragma once
++
++#include "pktr_ipc.h"
++#include <algorithm>
++#include <cstdlib>
++#include <string_view>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Process-wide PktR settings.
++struct pktr_settings {
++  /// Whether the PktR feedback view is printed.
++  bool enabled = false;
++  /// IPC parameters (gamma_db, beta, ewma_c).
++  pktr_config ipc{};
++  /// EWMA sigma (dB) above which the view treats the interval as a regime transition and suppresses
++  /// the (invalid, mean-lag-dominated) Cantelli cushion.
++  float sigma_transient_db = 6.0F;
++};
++
++namespace detail {
++
++/// Parse a float environment variable; returns fallback if unset/empty/unparseable.
++inline float env_float(const char* name, float fallback)
++{
++  const char* e = std::getenv(name);
++  if (e == nullptr || *e == '\0') {
++    return fallback;
++  }
++  char*       end = nullptr;
++  const float v   = std::strtof(e, &end);
++  return (end == e) ? fallback : v;
++}
++
++/// Parse a "1"/not-"1" boolean environment flag.
++inline bool env_flag(const char* name)
++{
++  const char* e = std::getenv(name);
++  return e != nullptr && std::string_view(e) == "1";
++}
++
++/// Load settings from the environment, clamping to sane ranges. Not cached (the cache is in
++/// pktr_runtime()); exposed for unit tests that want to drive it via setenv.
++inline pktr_settings load_pktr_settings()
++{
++  pktr_settings s;
++  s.enabled            = env_flag("KAIAIR_PKTR_METRICS");
++  s.ipc.gamma_db       = env_float("KAIAIR_PKTR_GAMMA_DB", s.ipc.gamma_db);
++  s.ipc.beta           = std::clamp(env_float("KAIAIR_PKTR_BETA", s.ipc.beta), 0.0F, 0.999999F);
++  s.ipc.ewma_c         = std::clamp(env_float("KAIAIR_PKTR_EWMA_C", s.ipc.ewma_c), 0.0F, 0.999999F);
++  s.sigma_transient_db = std::max(0.0F, env_float("KAIAIR_PKTR_SIGMA_TRANSIENT_DB", s.sigma_transient_db));
++  return s;
++}
++
++} // namespace detail
++
++/// Process-wide PktR settings, loaded once from the environment (KAIAIR_PKTR_*) and cached.
++inline const pktr_settings& pktr_runtime()
++{
++  static const pktr_settings s = detail::load_pktr_settings();
++  return s;
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/lib/scheduler/logging/scheduler_metrics_handler.h b/lib/scheduler/logging/scheduler_metrics_handler.h
+index 5308563de1..95ea63d268 100644
+--- a/lib/scheduler/logging/scheduler_metrics_handler.h
++++ b/lib/scheduler/logging/scheduler_metrics_handler.h
+@@ -4,7 +4,8 @@
+ 
+ #pragma once
+ 
+-#include "../kaiair/pktr_link_state.h" // KaiAir/PktR per-link interference statistics
++#include "../kaiair/pktr_link_state.h"     // KaiAir/PktR per-link interference statistics
++#include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR runtime knobs (EWMA c)
+ #include "scheduler_metrics_ue_configurator.h"
+ #include "ocudu/adt/flat_map.h"
+ #include "ocudu/adt/slotted_array.h"
+@@ -105,7 +106,8 @@ class cell_metrics_handler final : public sched_metrics_ue_configurator
+     std::optional<float>                   last_dl_olla;
+     std::optional<float>                   last_ul_olla;
+     /// KaiAir/PktR interference statistics, persistent across reports (its EWMA must keep memory).
+-    kaiair::pktr_link_state                pktr_link_state;
++    /// EWMA memory c comes from the runtime config (KAIAIR_PKTR_EWMA_C).
++    kaiair::pktr_link_state                pktr_link_state{kaiair::pktr_runtime().ipc.ewma_c};
+     non_persistent_data                    data;
+ 
+     scheduler_ue_metrics compute_report(std::chrono::milliseconds metric_report_period, unsigned nof_slots_per_sf);
+diff --git a/lib/scheduler/ue_context/ue_cell.h b/lib/scheduler/ue_context/ue_cell.h
+index 78f460d48d..2e14724aeb 100644
+--- a/lib/scheduler/ue_context/ue_cell.h
++++ b/lib/scheduler/ue_context/ue_cell.h
+@@ -6,7 +6,8 @@
+ 
+ #include "../cell/cell_harq_manager.h"
+ #include "../config/ue_configuration.h"
+-#include "../kaiair/pktr_link_state.h" // KaiAir/PktR per-link interference statistics
++#include "../kaiair/pktr_link_state.h"     // KaiAir/PktR per-link interference statistics
++#include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR runtime knobs (EWMA c)
+ #include "../support/pucch_power_controller.h"
+ #include "../support/pusch_power_controller.h"
+ #include "ue_channel_state_manager.h"
+@@ -205,7 +206,7 @@ private:
+   ocudulog::basic_logger&           logger;
+ 
+   /// KaiAir/PktR per-link interference statistics, owned by value (one per UE-per-cell link).
+-  kaiair::pktr_link_state pktr_link_state_;
++  kaiair::pktr_link_state pktr_link_state_{kaiair::pktr_runtime().ipc.ewma_c};
+ 
+   /// \brief Whether cell is currently active.
+   bool active = true;
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index 3744634b1c..bf822edb75 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -8,3 +8,7 @@ add_test(pktr_link_state_test pktr_link_state_test)
+ add_executable(pktr_ipc_test pktr_ipc_test.cpp)
+ target_link_libraries(pktr_ipc_test ocudulog gtest gtest_main)
+ add_test(pktr_ipc_test pktr_ipc_test)
++
++add_executable(pktr_runtime_config_test pktr_runtime_config_test.cpp)
++target_link_libraries(pktr_runtime_config_test ocudulog gtest gtest_main)
++add_test(pktr_runtime_config_test pktr_runtime_config_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp b/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+new file mode 100644
+index 0000000000..540c04b00a
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+@@ -0,0 +1,92 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_runtime_config.h"
++#include <cstdlib>
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++namespace {
++
++// Clear all KAIAIR_PKTR_* vars so each case starts from a known state. We test the (uncached)
++// detail::load_pktr_settings() directly, since pktr_runtime() caches on first use.
++void clear_env()
++{
++  ::unsetenv("KAIAIR_PKTR_METRICS");
++  ::unsetenv("KAIAIR_PKTR_GAMMA_DB");
++  ::unsetenv("KAIAIR_PKTR_BETA");
++  ::unsetenv("KAIAIR_PKTR_EWMA_C");
++  ::unsetenv("KAIAIR_PKTR_SIGMA_TRANSIENT_DB");
++}
++
++} // namespace
++
++// With nothing set, the loader returns the pktr_config defaults and disabled.
++TEST(pktr_runtime_config_test, defaults_when_unset)
++{
++  clear_env();
++  const pktr_settings s = detail::load_pktr_settings();
++  EXPECT_FALSE(s.enabled);
++  EXPECT_FLOAT_EQ(s.ipc.gamma_db, pktr_config{}.gamma_db);
++  EXPECT_FLOAT_EQ(s.ipc.beta, pktr_config{}.beta);
++  EXPECT_FLOAT_EQ(s.ipc.ewma_c, pktr_config{}.ewma_c);
++  EXPECT_FLOAT_EQ(s.sigma_transient_db, 6.0F);
++}
++
++// Valid env values are parsed into the settings.
++TEST(pktr_runtime_config_test, parses_env_values)
++{
++  clear_env();
++  ::setenv("KAIAIR_PKTR_METRICS", "1", 1);
++  ::setenv("KAIAIR_PKTR_GAMMA_DB", "5.5", 1);
++  ::setenv("KAIAIR_PKTR_BETA", "0.9", 1);
++  ::setenv("KAIAIR_PKTR_EWMA_C", "0.5", 1);
++  ::setenv("KAIAIR_PKTR_SIGMA_TRANSIENT_DB", "4.0", 1);
++  const pktr_settings s = detail::load_pktr_settings();
++  EXPECT_TRUE(s.enabled);
++  EXPECT_FLOAT_EQ(s.ipc.gamma_db, 5.5F);
++  EXPECT_FLOAT_EQ(s.ipc.beta, 0.9F);
++  EXPECT_FLOAT_EQ(s.ipc.ewma_c, 0.5F);
++  EXPECT_FLOAT_EQ(s.sigma_transient_db, 4.0F);
++  clear_env();
++}
++
++// An unparseable value falls back to the default rather than producing 0/garbage.
++TEST(pktr_runtime_config_test, bad_value_falls_back_to_default)
++{
++  clear_env();
++  ::setenv("KAIAIR_PKTR_GAMMA_DB", "not_a_number", 1);
++  const pktr_settings s = detail::load_pktr_settings();
++  EXPECT_FLOAT_EQ(s.ipc.gamma_db, pktr_config{}.gamma_db);
++  clear_env();
++}
++
++// beta and ewma_c are clamped to a finite range (no k=inf, no negative memory).
++TEST(pktr_runtime_config_test, clamps_out_of_range)
++{
++  clear_env();
++  ::setenv("KAIAIR_PKTR_BETA", "1.0", 1);    // would give k=inf unclamped
++  ::setenv("KAIAIR_PKTR_EWMA_C", "-0.5", 1); // negative memory is nonsense
++  ::setenv("KAIAIR_PKTR_SIGMA_TRANSIENT_DB", "-3.0", 1);
++  const pktr_settings s = detail::load_pktr_settings();
++  EXPECT_LT(s.ipc.beta, 1.0F);
++  EXPECT_TRUE(std::isfinite(cantelli_sigma_factor(s.ipc.beta)));
++  EXPECT_GE(s.ipc.ewma_c, 0.0F);
++  EXPECT_GE(s.sigma_transient_db, 0.0F);
++  clear_env();
++}
++
++// KAIAIR_PKTR_METRICS only enables on exactly "1".
++TEST(pktr_runtime_config_test, metrics_flag_requires_one)
++{
++  clear_env();
++  ::setenv("KAIAIR_PKTR_METRICS", "0", 1);
++  EXPECT_FALSE(detail::load_pktr_settings().enabled);
++  ::setenv("KAIAIR_PKTR_METRICS", "true", 1);
++  EXPECT_FALSE(detail::load_pktr_settings().enabled);
++  ::setenv("KAIAIR_PKTR_METRICS", "1", 1);
++  EXPECT_TRUE(detail::load_pktr_settings().enabled);
++  clear_env();
++}

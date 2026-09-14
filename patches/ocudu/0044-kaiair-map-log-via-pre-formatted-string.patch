@@ -1,0 +1,35 @@
+From cc9ee350856875618658f4cce82f17c6476aed72 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 16:18:53 -0500
+Subject: [PATCH 44/52] kaiair: map log via pre-formatted string
+
+---
+ .../cell_meas_manager/cell_meas_manager_impl.cpp  | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+index 823269c530..0819fb5a95 100644
+--- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
++++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
+@@ -378,13 +378,14 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_
+         for (const auto& [pci, v] : kaiair_nbrs) {
+           nb += fmt::format(" pci{}={:.0f}dBm", pci, v);
+         }
+-        logger.info("[KaiAir map] ue={} rnti={:#x} serving pci{} RSRP={} neighbors:{} (report #{})",
+-                    fmt::underlying(ue_index),
+-                    static_cast<unsigned>(kaiair_ue->get_c_rnti()),
+-                    kaiair_pci,
+-                    kaiair_serv.has_value() ? fmt::format("{:.0f}dBm", kaiair_serv_dbm) : std::string("n/a"),
+-                    nb.empty() ? std::string(" none") : nb,
+-                    kaiair_report_count);
++        logger.info("{}",
++                    fmt::format("[KaiAir map] ue={} rnti=0x{:x} serving pci{} RSRP={} neighbors:{} (report #{})",
++                                fmt::underlying(ue_index),
++                                static_cast<unsigned>(kaiair_ue->get_c_rnti()),
++                                kaiair_pci,
++                                kaiair_serv.has_value() ? fmt::format("{:.0f}dBm", kaiair_serv_dbm) : std::string("n/a"),
++                                nb.empty() ? std::string(" none") : nb,
++                                kaiair_report_count));
+       }
+     }
+   }

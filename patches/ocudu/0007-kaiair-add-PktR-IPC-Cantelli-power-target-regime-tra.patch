@@ -1,0 +1,336 @@
+From ea9d5e7da6611343ecf57b80c60f73027ce11ae3 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 27 Jun 2026 16:12:06 -0500
+Subject: [PATCH 07/52] kaiair: add PktR IPC (Cantelli power target) +
+ regime-transition-aware view
+
+Phase 2 (compute + display only, no scheduler actuation):
+
+- pktr_ipc.h: pure-math IPC. cantelli_sigma_factor(beta)=sqrt(beta/(1-beta)),
+  power_target_db = G + I_R + gamma + sigma*k(beta), and the dual
+  max_tolerable_interference_db = S - gamma - sigma*k(beta) (E_max[I_R]).
+  pktr_config{gamma_db, beta, ewma_c} carries the knobs (YAML wiring is T0.3).
+
+- pktr_ipc_test.cpp: 8 GTest cases (Cantelli factor at beta 0.5/0.8/0.9/0.99,
+  monotonicity, extreme-beta clamping, worked examples). All pass on hardware.
+
+- kaiair_pktr_metrics_view: surface the IPC target Tier-A in SINR space (the
+  unknown gain G cancels): required UL SINR = gamma + sigma*k, the TPC delta to
+  current SINR, and E_max[I_R]. Two honesty fixes from the first hardware run:
+  * Relabel NI/I_R/E_max as I+N (dBFS, relative), RSRP is dBFS per SCF-222, so
+    NI is offset from absolute dBm by RX-chain calibration (cancels in the
+    differential TPC loop; dBFS->dBm calibration tracked for absolute claims).
+  * Regime-transition flag: when EWMA sigma exceeds link jitter (>6 dB) the
+    variance is mean-lag-dominated during a fast I+N step, not steady-state
+    jitter; suppress the (invalid, absurd) cushion/target for that interval
+    instead of printing e.g. 265 dB. Threshold becomes a pktr_config knob in T0.3.
+
+Verified on the ARA gNB container: pktr_ipc_test 8/8 + pktr_link_state_test pass.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 64 ++++++++++++-
+ lib/scheduler/kaiair/pktr_ipc.h               | 79 ++++++++++++++++
+ .../unittests/scheduler/kaiair/CMakeLists.txt |  4 +
+ .../scheduler/kaiair/pktr_ipc_test.cpp        | 94 +++++++++++++++++++
+ 4 files changed, 238 insertions(+), 3 deletions(-)
+ create mode 100644 lib/scheduler/kaiair/pktr_ipc.h
+ create mode 100644 tests/unittests/scheduler/kaiair/pktr_ipc_test.cpp
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 6dcf106d3f..db245a2bfe 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ 
+ #include "kaiair_pktr_metrics_view.h"
++#include "lib/scheduler/kaiair/pktr_ipc.h"
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
+ #include <cmath>
+@@ -29,6 +30,14 @@ float cqi_to_sinr_db_estimate(float cqi)
+   return 1.9F * cqi - 5.0F;
+ }
+ 
++/// EWMA sigma (dB) above which we treat the interval as a regime transition rather than steady
++/// state. During a fast step in I+N the EWMA mean lags ~1/(1-c) samples, so every sample sits far
++/// from the stale mean and the EWMA variance is inflated by that mean-lag, not by genuine
++/// steady-state interference jitter. The Cantelli cushion (sigma*k(beta)) is not meaningful for
++/// such an interval and would print an absurd power target. Observed link jitter is 0.2-2.6 dB;
++/// transients reach 9-26 dB, so 6 dB cleanly separates them. Becomes a pktr_config knob in T0.3.
++constexpr float sigma_transient_db = 6.0F;
++
+ } // namespace
+ 
+ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+@@ -69,10 +78,14 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+     }
+ 
+     // ---- gNB-measured, uplink -> receiver interference (the Cantelli input) ----
++    // NOTE: RSRP is dBFS (full-scale relative, per SCF-222), SINR is a ratio; so NI = RSRP - SINR
++    // is interference+noise in dBFS, a RELATIVE level, offset from absolute dBm by the RX-chain
++    // calibration. Fine for the differential TPC loop (offset cancels); needs dBFS->dBm calibration
++    // before any absolute claim. In this single-cell test NI is noise-floor dominated, not co-channel.
+     if (has_snr && has_rsrp) {
+-      const float ni = ue.pusch_rsrp_db - ue.pusch_snr_db; // RSRP - SINR = interference + noise (dB)
++      const float ni = ue.pusch_rsrp_db - ue.pusch_snr_db; // RSRP - SINR = interference + noise (dBFS rel)
+       fmt::print("    gNB-measured UL: PUSCH SINR={:.1f} dB, RSRP={:.1f} dBFS  ->  interference+noise  NI = RSRP-SINR = "
+-                 "{:.1f} dB\n",
++                 "{:.1f} dBFS (relative)\n",
+                  ue.pusch_snr_db,
+                  ue.pusch_rsrp_db,
+                  ni);
+@@ -84,11 +97,56 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+ 
+     // ---- maintained interference state (the smoothed values the control loop actually uses) ----
+     if (ue.pktr_nof_ni_samples > 0) {
+-      fmt::print("    PktR state     : I_R (EWMA mean NI) = {:.1f} dB, sigma_NI = {:.2f} dB   over {} packets   "
++      fmt::print("    PktR state     : I_R (EWMA mean I+N, dBFS rel) = {:.1f} dB, sigma = {:.2f} dB   over {} packets   "
+                  "[the Cantelli inputs]\n",
+                  ue.pktr_mean_ni_db,
+                  ue.pktr_std_ni_db,
+                  ue.pktr_nof_ni_samples);
++
++      // ---- IPC: the power-control target derived from the maintained state (display only) ----
++      // Tier-A honest form: we work in SINR space, where the unknown gain term G cancels. The
++      // power loop must drive the UL SINR to the deterministic margin gamma plus the Cantelli
++      // reliability cushion sigma*k(beta); the gap to the current SINR is the TPC command it would
++      // issue. E_max[I_R] is the interference headroom below the received signal level.
++      const kaiair::pktr_config cfg; // defaults: gamma=3 dB, beta=0.99, c=15/16
++      const float k          = kaiair::cantelli_sigma_factor(cfg.beta);
++      const float cushion    = ue.pktr_std_ni_db * k;          // sigma*k(beta)
++      const float sinr_targ  = cfg.gamma_db + cushion;         // required UL SINR for (gamma, beta)
++
++      if (ue.pktr_std_ni_db > sigma_transient_db) {
++        // Mid regime-change: the EWMA variance is dominated by mean-lag, not steady-state jitter,
++        // so the Cantelli cushion is not valid. Flag it instead of printing an absurd power target.
++        fmt::print("    PktR IPC       : [regime transition] sigma={:.1f} dB >> link jitter -> EWMA variance "
++                   "dominated by mean-lag; steady-state cushion not valid, IPC target suppressed this interval\n",
++                   ue.pktr_std_ni_db);
++      } else {
++        fmt::print("    PktR IPC       : required UL SINR = gamma({:.1f}) + cushion(sigma*k={:.2f}*{:.2f}={:.2f}) = "
++                   "{:.2f} dB   (beta={:.2f})\n",
++                   cfg.gamma_db,
++                   ue.pktr_std_ni_db,
++                   k,
++                   cushion,
++                   sinr_targ,
++                   cfg.beta);
++        if (has_snr) {
++          const float tpc_delta = sinr_targ - ue.pusch_snr_db; // >0 => raise power
++          fmt::print("    => TPC command : SINR target {:.2f} dB - current {:.1f} dB = {:+.2f} dB  ({})\n",
++                     sinr_targ,
++                     ue.pusch_snr_db,
++                     tpc_delta,
++                     tpc_delta > 0.0F ? "raise power" : "lower/hold power");
++        }
++        if (has_rsrp) {
++          // E_max[I_R] = S - gamma - sigma*k(beta), with the received signal level S ~ RSRP (dBFS rel).
++          const float e_max = kaiair::max_tolerable_interference_db(ue.pusch_rsrp_db, ue.pktr_std_ni_db, cfg);
++          fmt::print("    => E_max[I_R]  : tolerable mean I+N = RSRP({:.1f}) - {:.2f} = {:.1f} dBFS rel   "
++                     "(headroom {:.1f} dB above current I_R)\n",
++                     ue.pusch_rsrp_db,
++                     cfg.gamma_db + cushion,
++                     e_max,
++                     e_max - ue.pktr_mean_ni_db);
++        }
++      }
+     }
+   }
+ }
+diff --git a/lib/scheduler/kaiair/pktr_ipc.h b/lib/scheduler/kaiair/pktr_ipc.h
+new file mode 100644
+index 0000000000..30d826ac2f
+--- /dev/null
++++ b/lib/scheduler/kaiair/pktr_ipc.h
+@@ -0,0 +1,79 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++//
++// KaiAir / PktR, Interference-aware Power Control (IPC), the fast (per-packet) loop.
++//
++// Given the receiver-side interference statistics maintained by pktr_link_state (the EWMA mean I_R
++// and standard deviation sigma of the interference-plus-noise NI), IPC computes the transmit-power
++// target that meets a required SINR margin gamma with reliability beta:
++//
++//   P_T = G + I_R + gamma + sigma * k(beta)
++//
++// where
++//   G        is the channel gain-compensation term (path loss to overcome, dB),
++//   I_R      is the EWMA mean receiver interference-plus-noise (dB),
++//   gamma    is the required SINR margin (dB),
++//   sigma    is the combined SINR standard deviation, sigma = sqrt(Var[G] + Var[NI]) (dB), and
++//   k(beta)  is the Cantelli one-sided deviation factor for reliability beta.
++//
++// The reliability cushion comes from Cantelli's (one-sided Chebyshev) inequality: for a random
++// variable X with mean mu and variance sigma^2, P(X - mu <= -k*sigma) <= 1/(1+k^2). Requiring the
++// SINR to fall below target with probability at most 1-beta gives 1/(1+k^2) = 1-beta, hence
++//
++//   k(beta) = sqrt( beta / (1 - beta) ).
++//
++// Examples: beta=0.5 -> k=1, beta=0.8 -> k=2, beta=0.9 -> k=3, beta=0.99 -> k=9.9499.
++//
++// The dual quantity used by K-adaptation / exclusion-region sizing is the maximum mean interference
++// a link can tolerate at a given received signal level S while still meeting (gamma, beta):
++//
++//   E_max[I_R] = S - gamma - sigma * k(beta).
++//
++// This header is pure math: no scheduler state, no I/O. It is unit-agnostic, every term is in dB
++// (or dBm) and the caller is responsible for using consistent units.
++
++#pragma once
++
++#include "pktr_link_state.h" // for default_ewma_c
++#include <algorithm>
++#include <cmath>
++
++namespace ocudu {
++namespace kaiair {
++
++/// Static configuration for the PktR power-control loop.
++struct pktr_config {
++  /// Required SINR margin gamma (dB).
++  float gamma_db = 3.0F;
++  /// Target reliability beta in (0, 1), e.g. 0.99 for 99% delivery.
++  float beta = 0.99F;
++  /// EWMA old-sample weight c for the interference filter (filter memory).
++  float ewma_c = pktr_link_state::default_ewma_c;
++};
++
++/// Cantelli one-sided deviation factor k(beta) = sqrt(beta / (1 - beta)).
++/// beta is clamped to [0, 1) to keep the result finite.
++inline float cantelli_sigma_factor(float beta)
++{
++  const float b = std::clamp(beta, 0.0F, 0.999999F);
++  return std::sqrt(b / (1.0F - b));
++}
++
++/// Transmit-power target P_T = G + I_R + gamma + sigma * k(beta), all terms in dB/dBm.
++///   gain_comp_db : channel gain-compensation term G (path loss to overcome, dB)
++///   mean_ni_db   : EWMA mean receiver interference-plus-noise I_R (dB)
++///   sigma_db     : combined SINR standard deviation (dB)
++inline float power_target_db(float gain_comp_db, float mean_ni_db, float sigma_db, const pktr_config& cfg)
++{
++  return gain_comp_db + mean_ni_db + cfg.gamma_db + sigma_db * cantelli_sigma_factor(cfg.beta);
++}
++
++/// Maximum tolerable mean interference E_max[I_R] = S - gamma - sigma * k(beta) (dB) at received
++/// signal level S, below which the (gamma, beta) reliability target still holds.
++inline float max_tolerable_interference_db(float signal_db, float sigma_db, const pktr_config& cfg)
++{
++  return signal_db - cfg.gamma_db - sigma_db * cantelli_sigma_factor(cfg.beta);
++}
++
++} // namespace kaiair
++} // namespace ocudu
+diff --git a/tests/unittests/scheduler/kaiair/CMakeLists.txt b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+index fff474846b..3744634b1c 100644
+--- a/tests/unittests/scheduler/kaiair/CMakeLists.txt
++++ b/tests/unittests/scheduler/kaiair/CMakeLists.txt
+@@ -4,3 +4,7 @@
+ add_executable(pktr_link_state_test pktr_link_state_test.cpp)
+ target_link_libraries(pktr_link_state_test ocudulog gtest gtest_main)
+ add_test(pktr_link_state_test pktr_link_state_test)
++
++add_executable(pktr_ipc_test pktr_ipc_test.cpp)
++target_link_libraries(pktr_ipc_test ocudulog gtest gtest_main)
++add_test(pktr_ipc_test pktr_ipc_test)
+diff --git a/tests/unittests/scheduler/kaiair/pktr_ipc_test.cpp b/tests/unittests/scheduler/kaiair/pktr_ipc_test.cpp
+new file mode 100644
+index 0000000000..e81e874bb4
+--- /dev/null
++++ b/tests/unittests/scheduler/kaiair/pktr_ipc_test.cpp
+@@ -0,0 +1,94 @@
++// SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
++// SPDX-License-Identifier: BSD-3-Clause-Open-MPI
++
++#include "lib/scheduler/kaiair/pktr_ipc.h"
++#include <gtest/gtest.h>
++
++using namespace ocudu;
++using namespace ocudu::kaiair;
++
++// The Cantelli factor k(beta) = sqrt(beta/(1-beta)) at the textbook reliability points.
++TEST(pktr_ipc_test, cantelli_factor_known_points)
++{
++  EXPECT_NEAR(cantelli_sigma_factor(0.5F), 1.0F, 1e-4F);   // 0.5/0.5 = 1
++  EXPECT_NEAR(cantelli_sigma_factor(0.8F), 2.0F, 1e-4F);   // 0.8/0.2 = 4 -> 2
++  EXPECT_NEAR(cantelli_sigma_factor(0.9F), 3.0F, 1e-4F);   // 0.9/0.1 = 9 -> 3
++  EXPECT_NEAR(cantelli_sigma_factor(0.99F), 9.9499F, 1e-3F); // 0.99/0.01 = 99 -> 9.9499
++}
++
++// k(beta) increases with beta: a stricter reliability target needs a bigger cushion.
++TEST(pktr_ipc_test, cantelli_factor_monotonic_in_beta)
++{
++  EXPECT_LT(cantelli_sigma_factor(0.5F), cantelli_sigma_factor(0.9F));
++  EXPECT_LT(cantelli_sigma_factor(0.9F), cantelli_sigma_factor(0.99F));
++  EXPECT_LT(cantelli_sigma_factor(0.99F), cantelli_sigma_factor(0.999F));
++}
++
++// beta is clamped to a finite range; values at/above 1 do not produce inf/nan.
++TEST(pktr_ipc_test, cantelli_factor_clamps_extreme_beta)
++{
++  EXPECT_FLOAT_EQ(cantelli_sigma_factor(0.0F), 0.0F);
++  EXPECT_TRUE(std::isfinite(cantelli_sigma_factor(1.0F)));
++  EXPECT_TRUE(std::isfinite(cantelli_sigma_factor(2.0F)));
++}
++
++// Worked example: P_T = G + I_R + gamma + sigma*k(beta).
++TEST(pktr_ipc_test, power_target_worked_example)
++{
++  pktr_config cfg;
++  cfg.gamma_db = 3.0F;
++  cfg.beta     = 0.99F; // k = 9.9499
++  // 100 + (-90) + 3 + 2*9.9499 = 13 + 19.8997 = 32.8997
++  EXPECT_NEAR(power_target_db(/*G=*/100.0F, /*I_R=*/-90.0F, /*sigma=*/2.0F, cfg), 32.8997F, 1e-2F);
++}
++
++// With zero variability the cushion vanishes: P_T = G + I_R + gamma.
++TEST(pktr_ipc_test, power_target_zero_sigma_is_deterministic_floor)
++{
++  pktr_config cfg;
++  cfg.gamma_db = 5.0F;
++  cfg.beta     = 0.9F;
++  EXPECT_NEAR(power_target_db(/*G=*/110.0F, /*I_R=*/-100.0F, /*sigma=*/0.0F, cfg), 15.0F, 1e-4F);
++}
++
++// More interference, more required margin, or more variability all raise the power target.
++TEST(pktr_ipc_test, power_target_monotonic_in_each_term)
++{
++  pktr_config cfg;
++  cfg.gamma_db = 3.0F;
++  cfg.beta     = 0.9F; // k = 3
++  const float base = power_target_db(100.0F, -90.0F, 2.0F, cfg);
++
++  EXPECT_GT(power_target_db(100.0F, -85.0F, 2.0F, cfg), base); // higher I_R
++  EXPECT_GT(power_target_db(100.0F, -90.0F, 4.0F, cfg), base); // higher sigma
++
++  pktr_config cfg_hi = cfg;
++  cfg_hi.gamma_db    = 6.0F;
++  EXPECT_GT(power_target_db(100.0F, -90.0F, 2.0F, cfg_hi), base); // higher gamma
++
++  pktr_config cfg_rel = cfg;
++  cfg_rel.beta       = 0.99F;
++  EXPECT_GT(power_target_db(100.0F, -90.0F, 2.0F, cfg_rel), base); // stricter beta
++}
++
++// E_max[I_R] = S - gamma - sigma*k(beta): the interference headroom below the signal level.
++TEST(pktr_ipc_test, max_tolerable_interference_worked_example)
++{
++  pktr_config cfg;
++  cfg.gamma_db = 3.0F;
++  cfg.beta     = 0.9F; // k = 3
++  // -50 - 3 - 2*3 = -59
++  EXPECT_NEAR(max_tolerable_interference_db(/*S=*/-50.0F, /*sigma=*/2.0F, cfg), -59.0F, 1e-3F);
++}
++
++// The power target and the interference bound are consistent: at P_T the received signal is
++// G+P_T... (kept simple), a stricter beta lowers the tolerable interference.
++TEST(pktr_ipc_test, max_tolerable_interference_monotonic_in_beta)
++{
++  pktr_config lax;
++  lax.beta = 0.8F; // k = 2
++  pktr_config strict;
++  strict.beta = 0.99F; // k = 9.95
++  EXPECT_GT(max_tolerable_interference_db(-50.0F, 2.0F, lax),
++            max_tolerable_interference_db(-50.0F, 2.0F, strict));
++}

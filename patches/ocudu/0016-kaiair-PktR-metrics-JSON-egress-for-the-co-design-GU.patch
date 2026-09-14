@@ -1,0 +1,162 @@
+From b590ba1c59814166fc6cb7380f59d775e1d66c7a Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 13 Jul 2026 17:13:52 -0500
+Subject: [PATCH 16/52] kaiair: PktR metrics JSON egress for the co-design GUI
+ (step 3)
+
+The metrics view now emits one machine-readable telemetry record per interval to
+KAIAIR_PKTR_METRICS_JSON (agent serves it at GET /metrics): ul_sinr/rsrp/ni,
+e_max, tpc, dl_cqi/bler, ul_delay (SR->PUSCH), k/er (GRK), ul/dl throughput, and a
+provisional eco_ratio (delivered kbps per PRB). Written atomically (tmp+rename);
+absent fields are JSON null. No-op when the env var is unset (backward compatible).
+
+Verified on HW: /metrics returned live per-interval data with an attached UE.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    | 122 ++++++++++++++++++
+ 1 file changed, 122 insertions(+)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 502ea89383..103a906101 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -6,7 +6,12 @@
+ #include "lib/scheduler/kaiair/pktr_runtime_config.h"
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
++#include <chrono>
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
++#include <string>
+ #include <vector>
+ 
+ using namespace ocudu;
+@@ -26,10 +31,127 @@ float cqi_to_sinr_db_estimate(float cqi)
+   return 1.9F * cqi - 5.0F;
+ }
+ 
++/// KaiAir co-design (step 3): emit one machine-readable telemetry record per metrics interval to the
++/// file named by KAIAIR_PKTR_METRICS_JSON (the co-design agent serves it at GET /metrics). Written
++/// atomically (tmp + rename) so the agent never reads a partial file. No-op when the env var is unset.
++void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
++{
++  const char* path = std::getenv("KAIAIR_PKTR_METRICS_JSON");
++  if (path == nullptr or *path == '\0') {
++    return;
++  }
++
++  // Pick the first UE that produced feedback this interval (mirrors the print gate).
++  const scheduler_ue_metrics* sel = nullptr;
++  for (const scheduler_ue_metrics& ue : cell.ue_metrics) {
++    const bool     has_cqi = ue.cqi_stats.get_nof_observations() > 0;
++    const bool     has_snr = std::isfinite(ue.pusch_snr_db) and ue.pusch_snr_db != 0.0F;
++    const unsigned dl_tot  = ue.dl_nof_ok + ue.dl_nof_nok;
++    if (has_cqi or has_snr or dl_tot > 0) {
++      sel = &ue;
++      break;
++    }
++  }
++
++  const kaiair::pktr_settings& s          = kaiair::pktr_runtime();
++  const kaiair::pktr_config&   cfg        = s.ipc;
++  const float                  gamma_live = kaiair::pktr_gamma_now(cfg.gamma_db);
++  const bool                   actuate    = kaiair::pktr_actuate_now(s.actuate);
++  const double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
++
++  std::string j   = fmt::format(R"({{"ts":{:.3f},"pci":{},"actuate":{})", ts, cell.pci, actuate ? "true" : "false");
++  auto        num = [&](const char* k, bool present, double v) {
++    j += present ? fmt::format(R"(,"{}":{:.3f})", k, v) : fmt::format(R"(,"{}":null)", k);
++  };
++  auto inum = [&](const char* k, bool present, long v) {
++    j += present ? fmt::format(R"(,"{}":{})", k, v) : fmt::format(R"(,"{}":null)", k);
++  };
++
++  if (sel == nullptr) {
++    j += R"(,"rnti":null)";
++    for (const char* k : {"ul_sinr_db", "ul_rsrp_dbfs", "ni_dbfs", "e_max_dbfs", "tpc_db", "dl_cqi",
++                          "dl_bler_pct", "ul_delay_ms", "k_db", "er_nodes", "ul_mbps", "dl_mbps", "eco_ratio"}) {
++      j += fmt::format(R"(,"{}":null)", k);
++    }
++  } else {
++    const scheduler_ue_metrics& ue      = *sel;
++    const bool                  has_snr = std::isfinite(ue.pusch_snr_db) and ue.pusch_snr_db != 0.0F;
++    const bool                  has_rsrp = std::isfinite(ue.pusch_rsrp_db);
++    const bool                  has_cqi = ue.cqi_stats.get_nof_observations() > 0;
++    const bool                  has_ni  = ue.pktr_nof_ni_samples > 0;
++    const unsigned              dl_tot  = ue.dl_nof_ok + ue.dl_nof_nok;
++    const unsigned              ul_tot  = ue.ul_nof_ok + ue.ul_nof_nok;
++    const float                 cushion = ue.pktr_std_ni_db * kaiair::cantelli_sigma_factor(cfg.beta);
++
++    j += fmt::format(R"(,"rnti":"{:#06x}")", to_value(ue.rnti));
++    num("ul_sinr_db", has_snr, ue.pusch_snr_db);
++    num("ul_rsrp_dbfs", has_rsrp, ue.pusch_rsrp_db);
++    num("ni_dbfs", has_ni, ue.pktr_mean_ni_db);
++
++    // E_max[I_R] with the live SINR-target margin; TPC command = target - current SINR.
++    kaiair::pktr_config emax_cfg = cfg;
++    emax_cfg.gamma_db            = gamma_live;
++    const bool  emax_ok = has_rsrp and has_ni;
++    const float e_max   = emax_ok ? kaiair::max_tolerable_interference_db(ue.pusch_rsrp_db, ue.pktr_std_ni_db, emax_cfg) : 0.0F;
++    num("e_max_dbfs", emax_ok, e_max);
++    num("tpc_db", has_snr and has_ni, (gamma_live + cushion) - ue.pusch_snr_db);
++
++    inum("dl_cqi", has_cqi, static_cast<long>(std::lround(ue.cqi_stats.get_mean())));
++    num("dl_bler_pct", dl_tot > 0, 100.0 * static_cast<double>(ue.dl_nof_nok) / static_cast<double>(dl_tot));
++
++    // UL access delay: SR-to-PUSCH if available, else the PUSCH HARQ delay.
++    const bool  has_delay = ue.avg_sr_to_pusch_delay_ms.has_value() or ue.avg_pusch_harq_delay_ms.has_value();
++    const float delay = ue.avg_sr_to_pusch_delay_ms.value_or(ue.avg_pusch_harq_delay_ms.value_or(0.0F));
++    num("ul_delay_ms", has_delay, delay);
++
++    // GRK exclusion-region / K (observe-only), same sizing as the console view.
++    bool k_ok = false, er_ok = false;
++    long er_nodes = 0;
++    float k_db    = 0.0F;
++    if (s.grk_view and emax_ok) {
++      std::vector<kaiair::grk_interferer> cands;
++      if (not std::isnan(s.grk_xcell_rx_db)) {
++        cands.push_back(kaiair::grk_interferer{0xffffu, s.grk_xcell_rx_db, 0.0F, s.grk_xcell_activity});
++      }
++      const kaiair::grk_state grk = kaiair::size_exclusion_region(ue.pusch_rsrp_db, e_max, std::move(cands));
++      er_nodes = static_cast<long>(grk.exclusion_region.size());
++      er_ok    = true;
++      k_ok     = not std::isnan(s.grk_xcell_rx_db);
++      k_db     = grk.k_db;
++    }
++    num("k_db", k_ok, k_db);
++    inum("er_nodes", er_ok, er_nodes);
++
++    num("ul_mbps", true, ue.ul_brate_kbps / 1000.0);
++    num("dl_mbps", true, ue.dl_brate_kbps / 1000.0);
++
++    // eco_ratio (provisional): delivered kbps per PRB used, spectral efficiency; higher = better.
++    const unsigned prbs     = ue.tot_pdsch_prbs_used + ue.tot_pusch_prbs_used;
++    const double   dl_gp    = ue.dl_brate_kbps * (dl_tot > 0 ? static_cast<double>(ue.dl_nof_ok) / dl_tot : 1.0);
++    const double   ul_gp    = ue.ul_brate_kbps * (ul_tot > 0 ? static_cast<double>(ue.ul_nof_ok) / ul_tot : 1.0);
++    num("eco_ratio", prbs > 0, (dl_gp + ul_gp) / prbs);
++  }
++  j += "}";
++
++  // Atomic replace so the agent never serves a torn file.
++  const std::string tmp = std::string(path) + ".tmp";
++  {
++    std::ofstream f(tmp, std::ios::trunc);
++    if (not f) {
++      return;
++    }
++    f.write(j.data(), static_cast<std::streamsize>(j.size()));
++  }
++  std::rename(tmp.c_str(), path);
++}
++
+ } // namespace
+ 
+ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+ {
++  // Co-design telemetry egress (no-op unless KAIAIR_PKTR_METRICS_JSON is set).
++  emit_pktr_metrics_json(cell);
++
+   bool printed_header = false;
+ 
+   for (const scheduler_ue_metrics& ue : cell.ue_metrics) {

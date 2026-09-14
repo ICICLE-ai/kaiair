@@ -1,0 +1,233 @@
+From b77470e5b12b27011c846fbbaa10d54b10a981a1 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Thu, 30 Jul 2026 15:34:55 -0500
+Subject: [PATCH 24/52] kaiair: LDP increments 3+4 - urgency-ordered retx pass
+ + N(D)-capped retxs for data TBs (SRB exempt)
+
+- Increment 3: with a deadline active, both intra-slice retx loops serve pending retxs
+  most-urgent-first (oldest first-tx = least remaining deadline), so per-slot grant/PDCCH
+  caps can never starve a near-deadline packet. Stock FIFO path untouched when LDP is off.
+- Increment 4: data TBs are allocated with max retxs capped to N(D)-1 via
+  ldp_capped_max_retxs() - the in-deadline budget enforced by construction, with the
+  abandonment check as backstop. Applied at the ue_cell_grid_allocator data call sites
+  ONLY: SRB/RRC traffic keeps the stock retx budget and is exempt from deadline
+  abandonment/ordering (deadline-dropping signaling would kill attach on marginal links).
+- k2 note: per-HARQ 'prefer small k2' is not a local knob in ocudu - k2 is fixed by the
+  cell-level (pdcch,pusch) slot pairing; revisit only if grant latency proves binding.
+- 9/9 LDP unit tests pass. HW smoke pending: bench RF degraded to SIB1-undecodable by
+  session end (LDP-off discriminator run shows attach failure is environmental, not code).
+---
+ lib/scheduler/kaiair/pktr_ldp.h               | 13 ++++
+ .../ue_scheduling/intra_slice_scheduler.cpp   | 74 +++++++++++++++++--
+ .../ue_scheduling/ue_cell_grid_allocator.cpp  | 20 +++--
+ .../scheduler/kaiair/pktr_ldp_test.cpp        | 18 +++++
+ 4 files changed, 112 insertions(+), 13 deletions(-)
+
+diff --git a/lib/scheduler/kaiair/pktr_ldp.h b/lib/scheduler/kaiair/pktr_ldp.h
+index 4bd0b1740d..07b79e0bcf 100644
+--- a/lib/scheduler/kaiair/pktr_ldp.h
++++ b/lib/scheduler/kaiair/pktr_ldp.h
+@@ -87,6 +87,19 @@ inline unsigned ldp_deadline_slots(const ldp_config& cfg, unsigned slots_per_ms)
+   return static_cast<unsigned>(std::lround(cfg.deadline_ms * static_cast<float>(slots_per_ms)));
+ }
+ 
++/// Deadline-aware cap on HARQ retransmissions: a TB whose deadline affords N(D) in-deadline
++/// transmissions should never be configured for more than N(D)-1 retransmissions -- the budget is
++/// then enforced by construction at allocation time (the abandonment check remains the backstop
++/// for slots that slip). Passes the configured max through unchanged when LDP is disabled.
++inline unsigned ldp_capped_max_retxs(const ldp_config& cfg, unsigned configured_max)
++{
++  if (cfg.deadline_ms <= 0.0F) {
++    return configured_max;
++  }
++  const unsigned budget = ldp_tx_budget(cfg); // >= 1 (first tx included)
++  return std::min(configured_max, budget - 1U);
++}
++
+ /// The effective per-transmission beta the Cantelli loop should target. With LDP enabled
+ /// (deadline > 0) this is p_req(N(D)); otherwise the caller's static per-tx beta passes through.
+ /// This is the single composition point between LDP and the IPC power loop.
+diff --git a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+index 3768b2250d..864d3eac09 100644
+--- a/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
++++ b/lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp
+@@ -4,6 +4,9 @@
+ 
+ #include "intra_slice_scheduler.h"
+ #include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR LDP: deadline-abandonment of stale retxs
++#include "../slicing/ran_slice_id.h" // KaiAir/PktR LDP: SRB slice exempt from deadline handling
++#include <algorithm> // KaiAir/PktR LDP: urgency sort
++#include <vector>    // KaiAir/PktR LDP: urgency sort
+ #include "../logging/scheduler_metrics_handler.h"
+ #include "ocudu/ran/pdcch/search_space.h"
+ #include "ocudu/support/math/mod_math_utils.h"
+@@ -289,11 +292,40 @@ unsigned intra_slice_scheduler::schedule_dl_retx_candidates(dl_ran_slice_candida
+   const slice_ue_repository& slice_ues     = slice.get_slice_ues();
+   dl_harq_pending_retx_list  pending_harqs = cell_harqs.pending_dl_retxs();
+ 
++  // KaiAir/PktR LDP: urgency-ordered retx pass. With a deadline active, pending retxs are served
++  // in non-decreasing remaining-deadline order (LDP-TR), so per-slot grant/PDCCH caps can never
++  // starve a near-deadline packet behind fresher ones. Stock path (LDP off) is untouched.
++  static thread_local std::vector<dl_harq_process_handle> kaiair_dl_ordered;
++  kaiair_dl_ordered.clear();
++  if (kaiair::pktr_runtime().ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID) {
++    for (auto it = pending_harqs.begin(); it != pending_harqs.end(); ++it) {
++      kaiair_dl_ordered.push_back(*it);
++    }
++    std::stable_sort(kaiair_dl_ordered.begin(),
++                     kaiair_dl_ordered.end(),
++                     [](const dl_harq_process_handle& a, const dl_harq_process_handle& b) {
++                       // Older first tx = less remaining deadline = more urgent.
++                       return a.kaiair_first_tx_slot() < b.kaiair_first_tx_slot();
++                     });
++  }
++  const bool kaiair_sorted   = not kaiair_dl_ordered.empty();
++  auto       kaiair_ordered_it = kaiair_dl_ordered.begin();
++
+   unsigned alloc_count = 0;
+-  for (auto it = pending_harqs.begin(); it != pending_harqs.end();) {
++  for (auto it = pending_harqs.begin();
++       kaiair_sorted ? (kaiair_ordered_it != kaiair_dl_ordered.end()) : (it != pending_harqs.end());) {
+     // Note: During retx alloc, the pending HARQ list will mutate. So, we prefetch the next node.
+-    auto prev_it = it++;
+-    auto h       = *prev_it;
++    dl_harq_process_handle h = [&] {
++      if (kaiair_sorted) {
++        return *kaiair_ordered_it++;
++      }
++      auto prev_it = it++;
++      return *prev_it;
++    }();
++    if (kaiair_sorted and not h.has_pending_retx()) {
++      // KaiAir: snapshot entry consumed/cancelled earlier in this pass.
++      continue;
++    }
+ 
+     if (h.get_grant_params().slice_id != slice.id()) {
+       // HARQ ReTx is for another slice.
+@@ -305,7 +337,7 @@ unsigned intra_slice_scheduler::schedule_dl_retx_candidates(dl_ran_slice_candida
+     // to new data instead of being wasted on an already-late TB.
+     {
+       const auto& kaiair_ldp = kaiair::pktr_runtime().ldp;
+-      if (kaiair_ldp.deadline_ms > 0.0F and h.kaiair_first_tx_slot().valid()) {
++      if (kaiair_ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID and h.kaiair_first_tx_slot().valid()) {
+         const unsigned kaiair_dl_slots =
+             kaiair::ldp_deadline_slots(kaiair_ldp, pdsch_slot.nof_slots_per_subframe());
+         if (static_cast<unsigned>(pdsch_slot - h.kaiair_first_tx_slot()) >= kaiair_dl_slots) {
+@@ -365,11 +397,37 @@ unsigned intra_slice_scheduler::schedule_ul_retx_candidates(ul_ran_slice_candida
+   const slice_ue_repository& slice_ues     = slice.get_slice_ues();
+   ul_harq_pending_retx_list  pending_harqs = cell_harqs.pending_ul_retxs();
+ 
++  // KaiAir/PktR LDP: urgency-ordered retx pass (see the DL loop above for rationale).
++  static thread_local std::vector<ul_harq_process_handle> kaiair_ul_ordered;
++  kaiair_ul_ordered.clear();
++  if (kaiair::pktr_runtime().ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID) {
++    for (auto it = pending_harqs.begin(); it != pending_harqs.end(); ++it) {
++      kaiair_ul_ordered.push_back(*it);
++    }
++    std::stable_sort(kaiair_ul_ordered.begin(),
++                     kaiair_ul_ordered.end(),
++                     [](const ul_harq_process_handle& a, const ul_harq_process_handle& b) {
++                       return a.kaiair_first_tx_slot() < b.kaiair_first_tx_slot();
++                     });
++  }
++  const bool kaiair_sorted   = not kaiair_ul_ordered.empty();
++  auto       kaiair_ordered_it = kaiair_ul_ordered.begin();
++
+   unsigned alloc_count = 0;
+-  for (auto it = pending_harqs.begin(); it != pending_harqs.end();) {
++  for (auto it = pending_harqs.begin();
++       kaiair_sorted ? (kaiair_ordered_it != kaiair_ul_ordered.end()) : (it != pending_harqs.end());) {
+     // Note: During retx alloc, the pending HARQ list will mutate. So, we prefetch the next node.
+-    auto prev_it = it++;
+-    auto h       = *prev_it;
++    ul_harq_process_handle h = [&] {
++      if (kaiair_sorted) {
++        return *kaiair_ordered_it++;
++      }
++      auto prev_it = it++;
++      return *prev_it;
++    }();
++    if (kaiair_sorted and not h.has_pending_retx()) {
++      // KaiAir: snapshot entry consumed/cancelled earlier in this pass.
++      continue;
++    }
+ 
+     if (h.get_grant_params().slice_id != slice.id()) {
+       continue;
+@@ -378,7 +436,7 @@ unsigned intra_slice_scheduler::schedule_ul_retx_candidates(ul_ran_slice_candida
+     // KaiAir/PktR LDP: deadline abandonment (see the DL retx loop above for rationale).
+     {
+       const auto& kaiair_ldp = kaiair::pktr_runtime().ldp;
+-      if (kaiair_ldp.deadline_ms > 0.0F and h.kaiair_first_tx_slot().valid()) {
++      if (kaiair_ldp.deadline_ms > 0.0F and slice.id() != SRB_RAN_SLICE_ID and h.kaiair_first_tx_slot().valid()) {
+         const unsigned kaiair_ul_slots =
+             kaiair::ldp_deadline_slots(kaiair_ldp, pusch_slot.nof_slots_per_subframe());
+         if (static_cast<unsigned>(pusch_slot - h.kaiair_first_tx_slot()) >= kaiair_ul_slots) {
+diff --git a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+index db494f5572..bf0f2339e4 100644
+--- a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
++++ b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+@@ -256,10 +256,16 @@ ue_cell_grid_allocator::setup_dl_grant_builder(const slice_ue&
+   // Allocate UE DL HARQ.
+   if (not is_retx) {
+     // It is a new tx.
++    // KaiAir/PktR LDP: data TBs never plan more transmissions than the deadline affords
++    // (N(D)-1 retxs); SRB/RRC traffic keeps the stock retx budget (never deadline-capped).
++    const unsigned kaiair_dl_max_retxs =
++        user.ran_slice_id() == SRB_RAN_SLICE_ID
++            ? expert_cfg.max_nof_dl_harq_retxs
++            : kaiair::ldp_capped_max_retxs(kaiair::pktr_runtime().ldp, expert_cfg.max_nof_dl_harq_retxs);
+     h_dl = ue_cc.harqs
+                .alloc_dl_harq(pdsch_alloc.slot,
+                               k1 + ue_cell_cfg.cell_cfg_common.ntn_cs_koffset,
+-                              expert_cfg.max_nof_dl_harq_retxs,
++                              kaiair_dl_max_retxs,
+                               uci.harq_bit_idx,
+                               user.ran_slice_id() == SRB_RAN_SLICE_ID)
+                .value();
+@@ -632,10 +638,14 @@ ue_cell_grid_allocator::setup_ul_grant_builder(const slice_ue&
+   // Allocate UE UL HARQ.
+   if (not is_retx) {
+     // It is a new tx.
+-    h_ul =
+-        ue_cc.harqs
+-            .alloc_ul_harq(pusch_alloc.slot, expert_cfg.max_nof_ul_harq_retxs, user.ran_slice_id() == SRB_RAN_SLICE_ID)
+-            .value();
++    // KaiAir/PktR LDP: same N(D) cap for UL data TBs; SRB keeps the stock budget.
++    const unsigned kaiair_ul_max_retxs =
++        user.ran_slice_id() == SRB_RAN_SLICE_ID
++            ? expert_cfg.max_nof_ul_harq_retxs
++            : kaiair::ldp_capped_max_retxs(kaiair::pktr_runtime().ldp, expert_cfg.max_nof_ul_harq_retxs);
++    h_ul = ue_cc.harqs
++               .alloc_ul_harq(pusch_alloc.slot, kaiair_ul_max_retxs, user.ran_slice_id() == SRB_RAN_SLICE_ID)
++               .value();
+     ocudu_assert(h_ul.has_value(), "Failed to allocate UL HARQ");
+   } else {
+     // It is a retx.
+diff --git a/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp b/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+index 1e0cc64705..4c72b83b3c 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_ldp_test.cpp
+@@ -105,3 +105,21 @@ TEST(pktr_ldp_test, deadline_slots_conversion)
+   cfg.deadline_ms = 0.0F; // disabled -> no budget
+   EXPECT_EQ(ldp_deadline_slots(cfg, 2), 0U);
+ }
++
++// N(D)-capped retransmissions: a TB never plans more than N(D)-1 retxs; disabled LDP passes the
++// configured max through; a single-shot deadline (N=1) means zero retransmissions.
++TEST(pktr_ldp_test, capped_max_retxs)
++{
++  ldp_config cfg; // disabled by default
++  EXPECT_EQ(ldp_capped_max_retxs(cfg, 4), 4U);
++
++  cfg.deadline_ms      = 20.0F; // first 5, retx 5 -> N = 4
++  cfg.first_tx_ms      = 5.0F;
++  cfg.retx_interval_ms = 5.0F;
++  EXPECT_EQ(ldp_tx_budget(cfg), 4U);
++  EXPECT_EQ(ldp_capped_max_retxs(cfg, 4), 3U); // N-1
++  EXPECT_EQ(ldp_capped_max_retxs(cfg, 2), 2U); // configured max still binds if tighter
++
++  cfg.deadline_ms = 5.0F; // N = 1 -> single shot
++  EXPECT_EQ(ldp_capped_max_retxs(cfg, 4), 0U);
++}

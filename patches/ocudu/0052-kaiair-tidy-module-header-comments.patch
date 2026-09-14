@@ -1,0 +1,277 @@
+From 841af17ff7f3331622358bfd11c28d6362d200d0 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 14 Sep 2026 09:41:15 -0500
+Subject: [PATCH 52/52] kaiair: tidy module header comments
+
+---
+ include/ocudu/kaiair/pktr_neighbor_store.h    | 23 ++++-------
+ .../kaiair/pktr_dl_power_controller.h         | 27 +++++--------
+ lib/scheduler/kaiair/pktr_er_controller.h     | 20 ++++------
+ lib/scheduler/kaiair/pktr_grk.h               | 39 +++++--------------
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 20 +++-------
+ lib/scheduler/kaiair/pktr_signal_map.h        | 28 ++++---------
+ lib/scheduler/kaiair/pktr_slot_gate.h         | 21 +++++-----
+ 7 files changed, 57 insertions(+), 121 deletions(-)
+
+diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
+index 1ae1a3097b..6ede6332c2 100644
+--- a/include/ocudu/kaiair/pktr_neighbor_store.h
++++ b/include/ocudu/kaiair/pktr_neighbor_store.h
+@@ -1,23 +1,14 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, process-wide NEIGHBOR STORE: the multi-cell signal-map feed (LDP/PRKS plan
+-// step B1/B2). Two producers, one consumer set:
++// KaiAir/PktR neighbor store, the multi-cell signal-map feed.
+ //
+-//   producer 1 (CU-CP, cell_meas_manager): every RRC MeasurementReport of a UE publishes the
+-//     serving-cell and neighbor-cell SSB-RSRP (dBm) keyed by the UE's C-RNTI, the dissertation's
+-//     §4.5.5 "signal map updated from intra-frequency measurement reports (38.133)". The UE never
+-//     computes K; it only measures.
+-//   producer 2 (the co-design agent's peer bus): neighbor gNBs' per-cell info (SSB power) and
+-//     per-link state (K, TX power, PRB occupancy beta, ER size) exchanged over UDP, PktR's
+-//     "PktR-Signal" message, written to a flat text file this store re-reads at ~2 Hz.
+-//   consumers (DU scheduler / metrics view): per-UE candidate interferer lists for the DL-victim
+-//     GRK evaluation (signal = serving RSRP, candidates = neighbor RSRPs, SAME dBm scale from the
+-//     SAME report), and the peer link table for the UL-victim attribution and the conflict graph.
+-//
+-// Identity: C-RNTI is the key shared by CU-CP and DU for a UE within one gNB; PCI identifies
+-// cells on the peer bus. Thread-safe (mutex); all readers copy out. Header-only, public include
+-// so both lib/cu_cp and lib/scheduler can see it.
++// The CU-CP publishes every RRC measurement report here, serving and neighbor SSB RSRP keyed by
++// the UE's C-RNTI. Peer gNBs' cell and link records arrive through the Xn exchange (or the UDP
++// development bus) and land in the same store. The DU side reads per-UE candidate interferer
++// lists for the DL evaluation, and the peer link table for the UL attribution and the conflict
++// graph. The UE never computes anything here, it only measures. C-RNTI identifies a UE within
++// its gNB and PCI identifies cells across gNBs.
+ 
+ #pragma once
+ 
+diff --git a/lib/scheduler/kaiair/pktr_dl_power_controller.h b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+index 66fc94f95b..4415b3ca7c 100644
+--- a/lib/scheduler/kaiair/pktr_dl_power_controller.h
++++ b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+@@ -1,25 +1,18 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, Tier-A IPC-DL closed-loop power controller (one per UE-per-cell link).
++// KaiAir/PktR Tier-A DL closed-loop power controller, one per UE-per-cell link.
+ //
+-// On DL the gNB is not the receiver, so it cannot measure per-packet SINR. Instead it drives the
+-// per-PDSCH transmit-power offset from the per-packet HARQ-ACK stream, holding the empirical BLER at
+-// the PktR target (1 - beta), per-packet reliability P(success) >= beta. The actuator is the
+-// pwr_ctrl_offset field (validated on hardware to move real TX power; see dl-power-actuator-confirmed).
++// The gNB cannot measure DL SINR at the receiver, so this loop drives the per-PDSCH transmit
++// power offset from the per-packet HARQ-ACK stream and holds the empirical BLER at the PktR
++// target 1 - beta. The pwr_ctrl_offset actuator was validated on hardware. Boosting clips on
++// this platform, so the offset is a shed-from-ceiling value clamped to 0..15 dB and the loop
++// never goes negative.
+ //
+-// Authority is one-sided on this platform: boosting clips (the lower-PHY amplitude controller keeps
+-// ~12 dB PAPR headroom and PDSCH already sits near the ceiling). So the offset is a SHED-from-ceiling
+-// value clamped to [0, 15] dB (0 = max power = ceiling, 15 = -15 dB). The loop adds power by moving
+-// toward 0 and sheds by moving toward 15; it never goes negative, so it never clips.
+-//
+-// Control law (per HARQ-ACK, OLLA-style asymmetric step, converges to BLER = target = 1 - beta):
+-//   ack  -> offset += eta * target           (success: shed a little, save power)
+-//   nack -> offset -= eta * (1 - target)      (failure: add power)
+-// At equilibrium E[delta] = (1-bler)*eta*target - bler*eta*(1-target) = 0  =>  bler = target.
+-// The integrator self-smooths, so no separate BLER filter is needed for control (one is kept only
+-// for display/debug). This is the measurement-based half of the IPC law; the CQI-based feedforward
+-// (set-point) is layered on in a later increment.
++// The control law is an OLLA-style asymmetric step per HARQ-ACK. On ack the offset grows by
++// eta*target (shed a little, save power). On nack it shrinks by eta*(1 - target) (add power).
++// At equilibrium the BLER equals the target. The integrator smooths itself, so the separate
++// BLER filter is kept only for display.
+ 
+ #pragma once
+ 
+diff --git a/lib/scheduler/kaiair/pktr_er_controller.h b/lib/scheduler/kaiair/pktr_er_controller.h
+index 45cf88d6ec..d2f440ad5e 100644
+--- a/lib/scheduler/kaiair/pktr_er_controller.h
++++ b/lib/scheduler/kaiair/pktr_er_controller.h
+@@ -1,19 +1,13 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, EXCLUSION-REGION CONTROLLER tick (plan steps B3-B5, DL-victim half).
+-//
+-// Once per tick (today: the 1 s metrics tick; later: a DU background executor) it
+-//   1. takes every UE we serve and builds its DL link's GRK state LIVE from the neighbor store:
+-//      signal S = the UE's serving-cell RSRP, candidates = the neighbor cells' RSRPs the SAME UE
+-//      reported (same dBm scale, no calibration needed), E_max[I_R] = S - gamma_DL - sigma_DL*k(beta)
+-//      -> size_exclusion_region() gives K and the ER (PRKS/PktR: K quantized to the boundary
+-//      interferer). This replaces the bench-calibrated env pseudo-interferer.
+-//   2. adds the PEER links published on the bus (their K, their receivers' view of our cell),
+-//   3. builds the conflict graph (mutual ER membership, PRKS §III-D),
+-//   4. computes ONAMA masks for OUR links over a look-ahead window and publishes them to the gate
+-//      table the scheduler consults (observe-only or enforce per KAIAIR_PKTR_ER_GATE).
+-// It also returns a per-UE summary for the telemetry JSON / the peer bus ("links" array).
++// KaiAir/PktR exclusion-region controller tick. Once per metrics tick it builds each served
++// UE's DL link state from the neighbor store (the signal is the serving-cell RSRP, the
++// candidates are the neighbor RSRPs from the same report, the budget is
++// E_max[I_R] = S - gamma - sigma*k), sizes the exclusion region and K, adds the links peer gNBs
++// published, builds the conflict graph, and publishes ONAMA masks for our links to the gate
++// table the scheduler consults. It also returns the per-UE summary used by the telemetry JSON
++// and the peer exchange.
+ 
+ #pragma once
+ 
+diff --git a/lib/scheduler/kaiair/pktr_grk.h b/lib/scheduler/kaiair/pktr_grk.h
+index d23c36e25c..9d45aad0aa 100644
+--- a/lib/scheduler/kaiair/pktr_grk.h
++++ b/lib/scheduler/kaiair/pktr_grk.h
+@@ -1,37 +1,18 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, GRK (Gain-Ratio-K) interference model and K-adaptation, the slow (network) loop.
++// KaiAir/PktR GRK (Gain-Ratio-K) interference model and K-adaptation, the slow network loop.
+ //
+-// The Physical-Ratio-K (PRK) model turns "which nodes interfere with link (T->R)?", impractical to
+-// answer by measuring every interferer's contribution, into a single, adaptable gain threshold.
+-// A node C is a *significant* interferer for the link (T->R) iff its gain to the receiver is within
+-// a factor K of the intended-signal gain:
++// PRK replaces per-interferer measurement with a single adaptable gain threshold. A node C is a
++// significant interferer of link (T,R) when G(C,R) >= G(T,R) / K. Nodes inside this exclusion
++// region are kept from transmitting concurrently by the ONAMA gate, so residual interference
++// comes only from the weaker nodes outside it. A larger K means a larger region, less
++// interference and less spatial reuse.
+ //
+-//   C in ExclusionRegion(T->R)   <=>   G(C,R) >= G(T,R) / K.
+-//
+-// Nodes inside the exclusion region (ER) are prevented from transmitting concurrently (by the ONAMA
+-// TDMA gate, Phase 5); the residual interference then comes only from the weaker, out-of-ER nodes.
+-// K trades reliability against spatial reuse: larger K => larger ER => fewer concurrent transmitters
+-// => less interference but lower reuse.
+-//
+-// K-adaptation sizes the ER so that the expected *residual* interference (from out-of-ER nodes) stays
+-// within the budget the power-control loop can tolerate, i.e. E_max[I_R] = S - gamma - sigma*k(beta)
+-// from pktr_ipc.h (the dual of the Cantelli transmit-power target). The interference-control error
+-//
+-//   Delta_I_R = E_max[I_R] - I_current
+-//
+-// drives it: Delta_I_R < 0 (interference exceeds budget) grows the ER (raises K); Delta_I_R > 0
+-// (headroom) lets it shrink (lowers K), reclaiming reuse.
+-//
+-// This header consumes a *gain map* only as an abstraction: the caller supplies, per candidate
+-// interferer C, the gain G(C,R), C's expected transmit power E[P_C], and its activity factor
+-// E[alpha_C] (from scheduling statistics). Where those come from, PUSCH/SRS RSRP + PHR for in-cell
+-// gains, neighbour-cell SSB-RSRP via TDD reciprocity for cross-cell gains, is the signal-map's job
+-// (Phase 1, T1.3/T1.4), not this module's.
+-//
+-// Units: gains, powers, E_max and I_R are in dB / dBm; interference powers are summed in the linear
+-// domain (they add as powers, not in dB). The module is otherwise pure math: no scheduler state.
++// K-adaptation sizes the region so the residual interference stays inside the budget the power
++// loop can tolerate, E_max[I_R] = S - gamma - sigma*k(beta) from pktr_ipc.h. The error
++// E_max[I_R] - I_current drives K up when interference exceeds the budget and lets K shrink,
++// reclaiming reuse, when there is headroom.
+ 
+ #pragma once
+ 
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index 9411eca1b6..52da56db2a 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -1,20 +1,12 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, process-wide runtime settings, loaded ONCE from the environment (T0.3).
+-//
+-// These are the research knobs for the PktR loops. They are read from KAIAIR_PKTR_* environment
+-// variables at first use and cached, so they can be swept between gNB runs without recompiling:
+-//
+-//   KAIAIR_PKTR_METRICS            = 1            enable the PktR feedback view (as before)
+-//   KAIAIR_PKTR_GAMMA_DB           = 3.0          required SINR margin gamma (dB)
+-//   KAIAIR_PKTR_BETA               = 0.99         reliability target beta in (0,1); k=sqrt(b/(1-b))
+-//   KAIAIR_PKTR_EWMA_C             = 0.9375       interference-EWMA memory c (15/16); agility knob
+-//   KAIAIR_PKTR_SIGMA_TRANSIENT_DB = 6.0          sigma above which an interval is a regime transition
+-//
+-// Defaults match pktr_config. The gNB-YAML `pktr:` section is the planned productization (T0.3b),
+-// once good operating values are found; until then the env path keeps c (a scheduler-internal knob)
+-// tunable without threading config through the scheduler-config plumbing.
++// KaiAir/PktR runtime settings. Read once from KAIAIR_PKTR_* environment variables and cached,
++// so operating points can be swept between runs without recompiling. Defaults match pktr_config.
++// The main knobs are KAIAIR_PKTR_GAMMA_DB (required SINR margin), KAIAIR_PKTR_BETA (per-packet
++// reliability target), KAIAIR_PKTR_EWMA_C (interference EWMA memory) and
++// KAIAIR_PKTR_SIGMA_TRANSIENT_DB (the sigma above which an interval counts as a regime
++// transition). A pktr section in the gNB YAML is planned once good operating values settle.
+ 
+ #pragma once
+ 
+diff --git a/lib/scheduler/kaiair/pktr_signal_map.h b/lib/scheduler/kaiair/pktr_signal_map.h
+index f235d68ceb..d4cd80b659 100644
+--- a/lib/scheduler/kaiair/pktr_signal_map.h
++++ b/lib/scheduler/kaiair/pktr_signal_map.h
+@@ -1,26 +1,14 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, the signal (gain) map: the "who-hears-whom" table the GRK exclusion-region
+-// computation runs on. It stores, per ordered pair (transmitter, receiver), the path gain
+-//
+-//   G(tx, rx) = (received power of tx's reference signal) - (tx's transmit power)   [dB],
+-//
+-// smoothed with an EWMA because path gains vary slowly. Crucially, gains come from *reference
+-// signals* (each tied to a known transmitter at a known power), never from the aggregate data
+-// SINR, that is what makes them per-link and separable:
+-//   - in-cell UL  G(UE->gNB): PUSCH/SRS RSRP + UE TX power (from PHR),
+-//   - in-cell DL  G(gNB->UE): SSB/CSI-RSRP reported by the UE,
+-//   - cross-cell  G(UE_u->gNB_B): neighbour-cell SSB-RSRP via TDD reciprocity.
+-//
+-// The map exposes candidate interferer lists (grk_interferer rows) for a receiver, which feed
+-// pktr_grk::size_exclusion_region directly. Per-node transmit power and activity factor (from
+-// scheduling statistics) are held alongside the gains so a candidate row is fully populated.
+-//
+-// Units note: rx_power and tx_power must be in consistent units per call. A fixed dBFS<->dBm
+-// calibration offset on the RX chain cancels in the GRK gain *ratio* K = G(T,R)/G(C,R), so the
+-// exclusion region is correct even with uncalibrated (relative) gains; only absolute-dBm claims
+-// would need the offset.
++// KaiAir/PktR signal map, the who-hears-whom gain table the GRK computation runs on. It stores
++// the path gain G(tx, rx) per ordered transmitter-receiver pair, smoothed with an EWMA. Gains
++// come from reference signals tied to a known transmitter at a known power, never from the
++// aggregate data SINR. In-cell UL gains come from PUSCH/SRS RSRP plus the UE transmit power
++// (PHR), in-cell DL gains from the UE-reported SSB/CSI RSRP, and cross-cell gains from
++// neighbour-cell SSB RSRP via TDD reciprocity. The map hands fully populated candidate
++// interferer rows to size_exclusion_region. A fixed dBFS to dBm calibration offset on the RX
++// chain cancels in the gain ratio, so relative gains are enough for a correct exclusion region.
+ 
+ #pragma once
+ 
+diff --git a/lib/scheduler/kaiair/pktr_slot_gate.h b/lib/scheduler/kaiair/pktr_slot_gate.h
+index 6bfa859c25..90e1852139 100644
+--- a/lib/scheduler/kaiair/pktr_slot_gate.h
++++ b/lib/scheduler/kaiair/pktr_slot_gate.h
+@@ -1,20 +1,17 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, ONAMA slot gate (PRKS-TWC §III-D, pktR §V; plan step B5).
++// KaiAir/PktR ONAMA slot gate.
+ //
+-// Per slot, every link gets a pseudo-random priority from a deterministic hash of (slot, link id)
+-// that EVERY cell computes identically (no message needed per slot). A link is ACTIVE in a slot
+-// iff it outranks every link in its conflict set for that slot; otherwise it is MUTED. One winner
+-// per conflicting pair per slot => no mutual deferral deadlock; randomization per slot => no
+-// starvation; expected share ~ 1/(|M_i|+1) for a full clique.
++// Every link gets a pseudo-random priority per slot from a deterministic hash of the slot index
++// and the link id, computed identically on every cell with no per-slot messages. A link is
++// active in a slot when it outranks its whole conflict set, otherwise it is muted. One winner
++// per conflicting pair avoids mutual deferral, the per-slot randomization avoids starvation,
++// and the expected share in a full clique is about one over the clique size.
+ //
+-// Masks are meant to be precomputed M slots ahead on a background executor (pipelining, as in
+-// PktR's OAI prototype) and looked up in the slot path. This header is the pure function core:
+-// given the conflict sets, answer "is link L active in slot s?". Gate policy:
+-//   off     : never mute (stock scheduling)
+-//   observe : compute, count would-be mutings, never mute
+-//   enforce : mute losing links (the slice scheduler skips them)
++// Masks are precomputed over a look-ahead window and looked up in the slot path. The gate
++// policy has three modes. Off never mutes, observe computes and counts would-be mutings without
++// muting, enforce actually mutes losing links.
+ 
+ #pragma once
+ 

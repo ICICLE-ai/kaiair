@@ -1,0 +1,34 @@
+From 3859a596b2010df010795a7cde7412b23ef5de25 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 22 Aug 2026 15:55:02 -0500
+Subject: [PATCH 12/12] kaiair: OAI UE neighbor tracking window +-256 samples
+ (unsynchronized gNB drift) + success log
+
+---
+ openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+index 5b6dabb15a..4570b5e43f 100644
+--- a/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
++++ b/openair1/PHY/NR_UE_ESTIMATION/nr_ue_measurements.c
+@@ -371,8 +371,17 @@ static bool validate_known_pci(NR_DL_FRAME_PARMS *frame_parms,
+   LOG_D(NR_PHY, "Known PCI validation completed for PCI=%d, metric=%d\n", known_pci, res.metric);
+   neighboring_cell_info->consec_fail = 0;
+   neighboring_cell_info->valid_meas = true;
+-  neighboring_cell_info->pss_search_start = pss_res.pos - 16;
+-  neighboring_cell_info->pss_search_length = 32;
++  // KaiAir: keep a +-256-sample tracking window instead of +-16. Unsynchronized gNBs (free-running
++  // X310 clocks) drift several samples per frame, so the stock 32-sample window loses the neighbor
++  // almost immediately and the measurement flaps valid/invalid (seen as start drifting 4-8 samples
++  // per attempt with peak=0), which never lets an A3 time-to-trigger complete.
++  neighboring_cell_info->pss_search_start = pss_res.pos - 256;
++  neighboring_cell_info->pss_search_length = 512;
++  {
++    static unsigned kaiair_nbr_ok_count = 0;
++    if ((kaiair_nbr_ok_count++ % 20) == 0)
++      LOG_I(NR_PHY, "[KaiAir nbr-meas] PCI=%d validated (pos=%d, sss metric=%d) ok=%u\n", known_pci, pss_res.pos, res.metric, kaiair_nbr_ok_count);
++  }
+ 
+   return true;
+ }

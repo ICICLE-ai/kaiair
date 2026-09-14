@@ -1,0 +1,77 @@
+From 9c71e7264eb64554151a27b40e6265060e7f1f16 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 12 Aug 2026 18:03:23 -0500
+Subject: [PATCH 32/52] kaiair: steady the DL target, EWMA-smoothed cushion
+ (tau ~1 s) + floor-outlier gate on charted telemetry
+
+The raw sigma*k cushion jumped 3-6 dB report-to-report (2 dB report quantization
++ allocation-size-dependent measurement noise), making the GUI target line
+breathe and the loop setpoint twitch; single floor-regime outlier reports
+(-2 dB slots under shed) also dragged the charted DL SINR average down.
+Cushion now EWMA-smoothed per UE; the telemetry mirror applies the same
+linear-regime gate as the control path.
+---
+ .../logging/scheduler_metrics_handler.cpp         |  6 +++++-
+ lib/scheduler/ue_context/ue_cell.cpp              | 15 ++++++++++-----
+ lib/scheduler/ue_context/ue_cell.h                |  5 +++++
+ 3 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/lib/scheduler/logging/scheduler_metrics_handler.cpp b/lib/scheduler/logging/scheduler_metrics_handler.cpp
+index f534255bf6..f5cd20da2a 100644
+--- a/lib/scheduler/logging/scheduler_metrics_handler.cpp
++++ b/lib/scheduler/logging/scheduler_metrics_handler.cpp
+@@ -278,7 +278,11 @@ void cell_metrics_handler::kaiair_handle_dl_sinr(du_ue_index_t ue_index,
+                                                  float         dl_offset_db)
+ {
+   if (ues.contains(ue_index)) {
+-    ues[ue_index].pktr_dl_link_state.push_ul_measurement(dl_sinr_db, 0.0F);
++    // Same floor-regime gate as the control path: with shed applied, single-slot outliers near the
++    // UE noise floor are measurement artifacts, keep them out of the charted average too.
++    if (dl_offset_db < 0.5F or dl_sinr_db > 5.0F) {
++      ues[ue_index].pktr_dl_link_state.push_ul_measurement(dl_sinr_db, 0.0F);
++    }
+     ues[ue_index].kaiair_dl_target_db = dl_target_db;
+     ues[ue_index].kaiair_dl_offset_db = dl_offset_db;
+   }
+diff --git a/lib/scheduler/ue_context/ue_cell.cpp b/lib/scheduler/ue_context/ue_cell.cpp
+index 95de566284..56b5aecadf 100644
+--- a/lib/scheduler/ue_context/ue_cell.cpp
++++ b/lib/scheduler/ue_context/ue_cell.cpp
+@@ -194,11 +194,16 @@ void ue_cell::kaiair_handle_dl_sinr(float dl_sinr_db)
+     pktr_dl_link_state_.push_ul_measurement(dl_sinr_db + off_meas, 0.0F); // FPE sample; sigma = std of channel
+   }
+ 
+-  const kaiair::pktr_settings& s       = kaiair::pktr_runtime();
+-  const float                  gamma   = kaiair::pktr_dl_gamma_now(s.dl_gamma_db);
+-  const float                  sigma   = pktr_dl_link_state_.sigma_sinr_db();
+-  const float                  k       = kaiair::cantelli_sigma_factor(s.ipc.beta);
+-  const float                  cushion = (sigma <= s.sigma_transient_db) ? sigma * k : 0.0F;
++  const kaiair::pktr_settings& s           = kaiair::pktr_runtime();
++  const float                  gamma       = kaiair::pktr_dl_gamma_now(s.dl_gamma_db);
++  const float                  sigma       = pktr_dl_link_state_.sigma_sinr_db();
++  const float                  k           = kaiair::cantelli_sigma_factor(s.ipc.beta);
++  const float                  cushion_raw = (sigma <= s.sigma_transient_db) ? sigma * k : 0.0F;
++  // Smooth the cushion (tau ~1 s at ~50 reports/s): the raw sigma*k jumps several dB report-to-
++  // report from quantization/measurement noise, which whipsaws the target line and the loop.
++  kaiair_dl_cushion_smooth_ =
++      (kaiair_dl_cushion_smooth_ < 0.0F) ? cushion_raw : 0.98F * kaiair_dl_cushion_smooth_ + 0.02F * cushion_raw;
++  const float cushion = kaiair_dl_cushion_smooth_;
+   // Loop input: smoothed CURRENT SINR = full-power-equivalent EWMA mean minus the live offset
+   // (the mean is offset-free by construction above). Falls back to the raw report until warm.
+   const bool  warm         = pktr_dl_link_state_.nof_samples() > 10;
+diff --git a/lib/scheduler/ue_context/ue_cell.h b/lib/scheduler/ue_context/ue_cell.h
+index 360057fc1f..98dc88ad5b 100644
+--- a/lib/scheduler/ue_context/ue_cell.h
++++ b/lib/scheduler/ue_context/ue_cell.h
+@@ -230,6 +230,11 @@ private:
+   /// exactly the Var[S-I] the cushion needs when fed with the composite SINR directly.
+   kaiair::pktr_link_state pktr_dl_link_state_{kaiair::pktr_runtime().ipc.ewma_c};
+ 
++  /// KaiAir DL-SINR: EWMA-smoothed Cantelli cushion (dB). The raw sigma*k jumps 3-6 dB between
++  /// reports (2 dB report quantization + allocation-size-dependent measurement noise), which makes
++  /// the target line breathe; smoothing steadies both the GUI red line and the loop setpoint.
++  float kaiair_dl_cushion_smooth_ = -1.0F; // <0 = uninitialized (seed on first sample)
++
+   /// \brief Whether cell is currently active.
+   bool active = true;
+ 

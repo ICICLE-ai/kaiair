@@ -1,0 +1,285 @@
+From 36dae97fa81fcd3c60a69370c289b02eb59f28bc Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Mon, 13 Jul 2026 16:44:59 -0500
+Subject: [PATCH 15/52] kaiair: PktR live control-file overlay, GUI can toggle
+ power/gamma without restart
+
+Co-design step 2. Adds an optional runtime overlay to pktr_runtime_config: when
+KAIAIR_PKTR_CTRL_FILE is set, the demo-critical toggles (power actuation on/off,
+SINR-target margin gamma) are re-read from the agent's JSON control file at
+runtime (rate-limited ~2 Hz via atomics) so the AgSlicing GUI can flip PktR on a
+running gNB. When the env var is unset (all non-GUI runs + unit tests) the overlay
+never activates and behaviour is identical to the env-only path (backward compat).
+
+- pktr_actuate_now()/pktr_gamma_now(): live-effective accessors (fall back to env)
+- UL gate (pktr_ul_sinr_offset_db) and DL loop (pktr_dl_power_controller update/
+  pwr_ctrl_offset) consult the overlay; metrics view shows live UL-actuate + gamma
+
+Verified on HW: UL-actuate off->ON->off and gamma 3.0->8.0 dB, live via the API
+with an attached UE, no restart. Unit tests unchanged (7+9+5 pass).
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    |  15 +-
+ .../kaiair/pktr_dl_power_controller.h         |  10 +-
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 136 +++++++++++++++++-
+ 3 files changed, 151 insertions(+), 10 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 545e198916..502ea89383 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -49,12 +49,12 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+                  cell.pci);
+       fmt::print("  [config] gamma={:.1f} dB  beta={:.3f} (k={:.2f})  ewma_c={:.4f}  sigma_transient={:.1f} dB  "
+                  "UL-actuate={}\n",
+-                 s.ipc.gamma_db,
++                 kaiair::pktr_gamma_now(s.ipc.gamma_db),
+                  s.ipc.beta,
+                  kaiair::cantelli_sigma_factor(s.ipc.beta),
+                  s.ipc.ewma_c,
+                  s.sigma_transient_db,
+-                 s.actuate ? "ON" : "off");
++                 kaiair::pktr_actuate_now(s.actuate) ? "ON" : "off");
+       printed_header = true;
+     }
+ 
+@@ -106,9 +106,10 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+       // reliability cushion sigma*k(beta); the gap to the current SINR is the TPC command it would
+       // issue. E_max[I_R] is the interference headroom below the received signal level.
+       const kaiair::pktr_config& cfg = kaiair::pktr_runtime().ipc; // gamma_db, beta, ewma_c (KAIAIR_PKTR_*)
++      const float gamma_live = kaiair::pktr_gamma_now(cfg.gamma_db); // live SINR-target margin (co-design GUI)
+       const float k         = kaiair::cantelli_sigma_factor(cfg.beta);
+       const float cushion   = ue.pktr_std_ni_db * k;           // sigma*k(beta)
+-      const float sinr_targ = cfg.gamma_db + cushion;          // required UL SINR for (gamma, beta)
++      const float sinr_targ = gamma_live + cushion;            // required UL SINR for (gamma, beta)
+ 
+       if (ue.pktr_std_ni_db > kaiair::pktr_runtime().sigma_transient_db) {
+         // Mid regime-change: the EWMA variance is dominated by mean-lag, not steady-state jitter,
+@@ -119,7 +120,7 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+       } else {
+         fmt::print("    PktR IPC       : required UL SINR = gamma({:.1f}) + cushion(sigma*k={:.2f}*{:.2f}={:.2f}) = "
+                    "{:.2f} dB   (beta={:.2f})\n",
+-                   cfg.gamma_db,
++                   gamma_live,
+                    ue.pktr_std_ni_db,
+                    k,
+                    cushion,
+@@ -135,11 +136,13 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+         }
+         if (has_rsrp) {
+           // E_max[I_R] = S - gamma - sigma*k(beta), with the received signal level S ~ RSRP (dBFS rel).
+-          const float e_max = kaiair::max_tolerable_interference_db(ue.pusch_rsrp_db, ue.pktr_std_ni_db, cfg);
++          kaiair::pktr_config emax_cfg = cfg; // apply the live SINR-target margin to the budget
++          emax_cfg.gamma_db            = gamma_live;
++          const float e_max = kaiair::max_tolerable_interference_db(ue.pusch_rsrp_db, ue.pktr_std_ni_db, emax_cfg);
+           fmt::print("    => E_max[I_R]  : tolerable mean I+N = RSRP({:.1f}) - {:.2f} = {:.1f} dBFS rel   "
+                      "(headroom {:.1f} dB above current I_R)\n",
+                      ue.pusch_rsrp_db,
+-                     cfg.gamma_db + cushion,
++                     gamma_live + cushion,
+                      e_max,
+                      e_max - ue.pktr_mean_ni_db);
+ 
+diff --git a/lib/scheduler/kaiair/pktr_dl_power_controller.h b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+index 2706faa5a2..6076a45374 100644
+--- a/lib/scheduler/kaiair/pktr_dl_power_controller.h
++++ b/lib/scheduler/kaiair/pktr_dl_power_controller.h
+@@ -53,7 +53,7 @@ public:
+   {
+     ++nof_acks_;
+     bler_ewma_ = bler_ewma_c * bler_ewma_ + (1.0F - bler_ewma_c) * (ack ? 0.0F : 1.0F);
+-    if (not enabled_) {
++    if (not enabled_now()) {
+       return;
+     }
+     // OLLA-style asymmetric step toward BLER = target. ack -> shed (offset up); nack -> add power (down).
+@@ -65,19 +65,23 @@ public:
+   /// (in which case the stock / static path applies). Quantized to the int8 1-dB field.
+   std::optional<int8_t> pwr_ctrl_offset() const
+   {
+-    if (not enabled_) {
++    if (not enabled_now()) {
+       return std::nullopt;
+     }
+     return static_cast<int8_t>(std::lround(offset_db_));
+   }
+ 
+-  bool     enabled() const { return enabled_; }
++  bool     enabled() const { return enabled_now(); }
+   float    offset_db() const { return offset_db_; }
+   float    target() const { return target_; }
+   float    bler() const { return bler_ewma_; }
+   uint64_t nof_acks() const { return nof_acks_; }
+ 
+ private:
++  /// Live-effective enable: the co-design GUI toggle when its overlay is active, else the
++  /// construction-time env value. Lets the GUI flip the DL loop without restarting the gNB.
++  bool enabled_now() const { return pktr_actuate_now(enabled_); }
++
+   bool     enabled_;
+   float    target_;            // 1 - beta
+   float    eta_;               // base step size (dB)
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index dbe6e2ffeb..c248df0740 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -20,10 +20,15 @@
+ 
+ #include "pktr_ipc.h"
+ #include <algorithm>
++#include <atomic>
++#include <chrono>
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdlib>
++#include <fstream>
++#include <iterator>
+ #include <optional>
++#include <string>
+ #include <string_view>
+ 
+ namespace ocudu {
+@@ -124,6 +129,135 @@ inline const pktr_settings& pktr_runtime()
+   return s;
+ }
+ 
++// ------------------------------------------------------------------------------------------------
++// KaiAir co-design: live control-file overlay (AgSlicing GUI).
++//
++// When KAIAIR_PKTR_CTRL_FILE points at the agent's JSON control file, the demo-critical toggles
++// (power actuation on/off, SINR-target margin) are re-read at runtime, rate-limited to ~2 Hz, so
++// the GUI can flip PktR WITHOUT restarting the gNB. When the env var is unset (all non-GUI runs and
++// the unit tests), the overlay never activates and behaviour is exactly the env-only path above
++// (backward compatible). The read path is a cheap null-check when the overlay is off.
++// ------------------------------------------------------------------------------------------------
++namespace detail {
++
++/// Control-file path, read once (it does not change within a run). nullptr => overlay off.
++inline const char* ctrl_file_path()
++{
++  static const char* p = std::getenv("KAIAIR_PKTR_CTRL_FILE");
++  return (p != nullptr and *p != '\0') ? p : nullptr;
++}
++
++struct live_controls_t {
++  std::atomic<bool>      active{false};   // has the control file been read at least once?
++  std::atomic<bool>      power{false};    // codesign AND power_control
++  std::atomic<float>     gamma_db{3.0F};  // sinr_target_db
++  std::atomic<long long> last_ms{0};      // last refresh (steady ms)
++};
++
++inline live_controls_t& live_controls()
++{
++  static live_controls_t s;
++  return s;
++}
++
++inline long long steady_now_ms()
++{
++  return std::chrono::duration_cast<std::chrono::milliseconds>(
++             std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++/// Minimal field extractors for our own small, agent-written control file (no JSON dependency).
++inline bool json_bool(const std::string& s, const char* key, bool fallback)
++{
++  const std::string k = std::string("\"") + key + "\"";
++  auto              p = s.find(k);
++  if (p == std::string::npos) {
++    return fallback;
++  }
++  p = s.find(':', p + k.size());
++  if (p == std::string::npos) {
++    return fallback;
++  }
++  const auto end = s.find_first_of(",}", p);
++  const auto t   = s.find("true", p);
++  const auto f   = s.find("false", p);
++  if (t != std::string::npos and (end == std::string::npos or t < end)) {
++    return true;
++  }
++  if (f != std::string::npos and (end == std::string::npos or f < end)) {
++    return false;
++  }
++  return fallback;
++}
++
++inline float json_float(const std::string& s, const char* key, float fallback)
++{
++  const std::string k = std::string("\"") + key + "\"";
++  auto              p = s.find(k);
++  if (p == std::string::npos) {
++    return fallback;
++  }
++  p = s.find(':', p + k.size());
++  if (p == std::string::npos) {
++    return fallback;
++  }
++  const char* base = s.c_str() + p + 1;
++  char*       endp = nullptr;
++  const float v    = std::strtof(base, &endp);
++  return (endp == base) ? fallback : v;
++}
++
++/// Re-read the control file at most ~2 Hz; update the atomics. Cheap no-op when the overlay is off.
++inline void refresh_live_controls()
++{
++  const char* path = ctrl_file_path();
++  if (path == nullptr) {
++    return;
++  }
++  live_controls_t& L    = live_controls();
++  const long long  now  = steady_now_ms();
++  long long        last = L.last_ms.load(std::memory_order_relaxed);
++  if (now - last < 500) {
++    return;
++  }
++  if (not L.last_ms.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
++    return; // another thread already claimed this refresh tick
++  }
++  std::ifstream f(path);
++  if (not f) {
++    return;
++  }
++  const std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
++  const bool        codesign = json_bool(s, "codesign", false);
++  const bool        power    = json_bool(s, "power_control", false);
++  const float       gamma    = json_float(s, "sinr_target_db", 3.0F);
++  L.power.store(codesign and power, std::memory_order_relaxed);
++  L.gamma_db.store(gamma, std::memory_order_relaxed);
++  L.active.store(true, std::memory_order_relaxed);
++}
++
++} // namespace detail
++
++/// Effective actuation gate: the live GUI toggle when the co-design overlay is active, else the
++/// env/compile-time gate \p env_fallback (s.actuate for UL, s.dl_loop for the DL loop, ...).
++inline bool pktr_actuate_now(bool env_fallback)
++{
++  detail::refresh_live_controls();
++  detail::live_controls_t& L = detail::live_controls();
++  return L.active.load(std::memory_order_relaxed) ? L.power.load(std::memory_order_relaxed)
++                                                  : env_fallback;
++}
++
++/// Effective SINR-target margin gamma (dB): the live GUI value when the overlay is active, else env.
++inline float pktr_gamma_now(float env_fallback)
++{
++  detail::refresh_live_controls();
++  detail::live_controls_t& L = detail::live_controls();
++  return L.active.load(std::memory_order_relaxed) ? L.gamma_db.load(std::memory_order_relaxed)
++                                                  : env_fallback;
++}
++
+ /// Adaptive UL SINR-target offset (dB) that PktR adds on top of the stock power-control target: the
+ /// Cantelli reliability cushion sigma*k(beta). This raises the closed-loop SINR target so the
+ /// beta-quantile of the SINR distribution (not just its mean) clears the operator's base target.
+@@ -134,7 +268,7 @@ inline const pktr_settings& pktr_runtime()
+ /// IPC-UL actuation policy.
+ inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls, const pktr_settings& s)
+ {
+-  if (not s.actuate or not ls.has_samples() or ls.std_ni_db() > s.sigma_transient_db) {
++  if (not pktr_actuate_now(s.actuate) or not ls.has_samples() or ls.std_ni_db() > s.sigma_transient_db) {
+     return 0.0F;
+   }
+   return ls.std_ni_db() * cantelli_sigma_factor(s.ipc.beta);

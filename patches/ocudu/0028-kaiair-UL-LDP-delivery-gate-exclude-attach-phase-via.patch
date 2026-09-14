@@ -1,0 +1,60 @@
+From 798d17d9feaae24d027694af62ce8687e056dfa1 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 11 Aug 2026 17:10:24 -0500
+Subject: [PATCH 28/52] kaiair: UL LDP delivery gate, exclude attach phase via
+ fallback mode, not slice id
+
+Bench-observed: UL grants are not reliably slice-attributed (steady-state UL data
+TBs carry the SRB slice id because UL BSR is not slice-mapped like DL buffer
+state), so the SRB-slice exemption silently discarded every UL TB and the UL
+delivery panel stayed empty. The attach/RRC phase is now excluded via
+ue_cc->is_in_fallback_mode() instead; DL keeps the slice gate (works there).
+---
+ .../ue_scheduling/ue_event_manager.cpp        | 34 ++++++-------------
+ 1 file changed, 10 insertions(+), 24 deletions(-)
+
+diff --git a/lib/scheduler/ue_scheduling/ue_event_manager.cpp b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
+index add744ac9f..cab785761d 100644
+--- a/lib/scheduler/ue_scheduling/ue_event_manager.cpp
++++ b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
+@@ -480,30 +480,16 @@ void ue_cell_event_manager::handle_crc_indication(const ul_crc_indication& crc_i
+ 
+       // KaiAir/PktR LDP: classify the FINAL outcome of UL DATA TBs for the delivery view, the UL
+       // mirror of the DL HARQ-ACK classification. CRC OK => delivered (age = PUSCH slot - first-tx
+-      // slot); CRC KO that leaves the process empty => dropped. SRB slice exempt.
+-      if (kaiair::pktr_runtime().debug_tpc) {
+-        static unsigned kaiair_ul_dbg = 0;
+-        if (++kaiair_ul_dbg % 50 == 1) {
+-          fmt::print("[KaiAir UL-LDP dbg] found={} id_match={} slice={} crc_ok={} empty={} first_tx_valid={}\n",
+-                     kaiair_h_ul.has_value(),
+-                     kaiair_h_ul.has_value() and kaiair_h_ul->id() == crc_ptr->harq_id,
+-                     kaiair_h_ul.has_value() and kaiair_h_ul->get_grant_params().slice_id.has_value()
+-                         ? static_cast<int>(static_cast<std::size_t>(*kaiair_h_ul->get_grant_params().slice_id))
+-                         : -1,
+-                     crc_ptr->tb_crc_success,
+-                     kaiair_h_ul.has_value() and kaiair_h_ul->empty(),
+-                     kaiair_h_ul.has_value() and kaiair_h_ul->kaiair_first_tx_slot().valid());
+-        }
+-      }
+-      if (kaiair_h_ul.has_value() and kaiair_h_ul->id() == crc_ptr->harq_id) {
+-        const auto& kaiair_slice = kaiair_h_ul->get_grant_params().slice_id;
+-        if (kaiair_slice.has_value() and *kaiair_slice != SRB_RAN_SLICE_ID) {
+-          if (crc_ptr->tb_crc_success and kaiair_h_ul->kaiair_first_tx_slot().valid()) {
+-            const unsigned age_slots = sl_rx - kaiair_h_ul->kaiair_first_tx_slot();
+-            metrics.kaiair_handle_tb_outcome(crc_ptr->ue_index, false, true, age_slots, kaiair_h_ul->nof_retxs() + 1);
+-          } else if (not crc_ptr->tb_crc_success and kaiair_h_ul->empty()) {
+-            metrics.kaiair_handle_tb_outcome(crc_ptr->ue_index, false, false, 0, kaiair_h_ul->nof_retxs() + 1);
+-          }
++      // slot); CRC KO that leaves the process empty => dropped. NOTE: UL grants are NOT reliably
++      // slice-attributed (bench-observed: steady-state UL data TBs carry the SRB slice id because
++      // UL BSR is not slice-mapped like DL buffer state), so the attach/RRC phase is excluded via
++      // fallback mode instead of the slice id used on the DL side.
++      if (kaiair_h_ul.has_value() and kaiair_h_ul->id() == crc_ptr->harq_id and not ue_cc->is_in_fallback_mode()) {
++        if (crc_ptr->tb_crc_success and kaiair_h_ul->kaiair_first_tx_slot().valid()) {
++          const unsigned age_slots = sl_rx - kaiair_h_ul->kaiair_first_tx_slot();
++          metrics.kaiair_handle_tb_outcome(crc_ptr->ue_index, false, true, age_slots, kaiair_h_ul->nof_retxs() + 1);
++        } else if (not crc_ptr->tb_crc_success and kaiair_h_ul->empty()) {
++          metrics.kaiair_handle_tb_outcome(crc_ptr->ue_index, false, false, 0, kaiair_h_ul->nof_retxs() + 1);
+         }
+       }
+ 

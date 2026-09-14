@@ -1,0 +1,247 @@
+From 5ec6e371f62721c8ba3b098748b836ce613a525a Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Sat, 27 Jun 2026 17:53:38 -0500
+Subject: [PATCH 09/52] kaiair: T2.2a, IPC-UL actuation (Cantelli cushion on
+ the stock TPC target)
+
+First closed-loop PktR actuation (UL, Tier-A, gNB-only). The stock PUSCH
+closed-loop power control already drives measured SINR toward a fixed target via
+TPC {-1,0,+1,+3} dB with a 40 ms prohibit + PHR cap; this makes that target
+dynamic by adding the adaptive Cantelli reliability cushion sigma*k(beta) on top
+of the operator's (MCS-sane) base target, so the beta-quantile of the SINR
+distribution, not just its mean, clears the requirement.
+
+- pktr_runtime_config.h: new `actuate` flag (KAIAIR_PKTR_ACTUATE, independent of
+  the view's KAIAIR_PKTR_METRICS for clean A/B) + pktr_ul_sinr_offset_db(): the
+  single home of the actuation policy. Returns the cushion sigma*k(beta), or 0
+  when actuation is off, the link has no stats, or sigma is in the
+  regime-transition zone, a transient/stale sigma spike must never over-drive UL
+  power (the bistable-link safety finding from the 2 Mbps collapse run).
+- pusch_power_controller::compute_tpc_command() takes a sinr-target offset (default
+  0 = stock); ue_cell_grid_allocator computes it from the UE's pktr_link_state at
+  the call site and passes it in.
+- view: [config] line shows UL-actuate ON/off.
+- pktr_runtime_config_test: 4 new gating cases (off, no-samples, steady-cushion,
+  sigma-spike-suppressed).
+
+Default-off, so behaviour is byte-for-byte stock unless KAIAIR_PKTR_ACTUATE=1.
+First live A/B to run at 250 kbps (monostable, safe); 2 Mbps collapse is left for
+the scheduling half. All KaiAir edits tagged with inline // KaiAir/PktR comments.
+
+Verified on the ARA gNB container: pktr_{link_state,ipc,runtime_config}_test pass;
+scheduler_test 100% (no regression); gnb links clean.
+---
+ .../consumers/kaiair_pktr_metrics_view.cpp    |  6 +-
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 26 ++++++++
+ .../support/pusch_power_controller.cpp        |  8 ++-
+ .../support/pusch_power_controller.h          |  4 +-
+ .../ue_scheduling/ue_cell_grid_allocator.cpp  |  8 ++-
+ .../kaiair/pktr_runtime_config_test.cpp       | 60 +++++++++++++++++++
+ 6 files changed, 104 insertions(+), 8 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 9a8f7910b0..25b81d9734 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -45,12 +45,14 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+       const kaiair::pktr_settings& s = kaiair::pktr_runtime();
+       fmt::print("\n[KaiAir/PktR] per-UE feedback (pci={}), what the UE reports to the gNB, and how PktR uses it:\n",
+                  cell.pci);
+-      fmt::print("  [config] gamma={:.1f} dB  beta={:.3f} (k={:.2f})  ewma_c={:.4f}  sigma_transient={:.1f} dB\n",
++      fmt::print("  [config] gamma={:.1f} dB  beta={:.3f} (k={:.2f})  ewma_c={:.4f}  sigma_transient={:.1f} dB  "
++                 "UL-actuate={}\n",
+                  s.ipc.gamma_db,
+                  s.ipc.beta,
+                  kaiair::cantelli_sigma_factor(s.ipc.beta),
+                  s.ipc.ewma_c,
+-                 s.sigma_transient_db);
++                 s.sigma_transient_db,
++                 s.actuate ? "ON" : "off");
+       printed_header = true;
+     }
+ 
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index c24d1df581..bc56626594 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -30,6 +30,9 @@ namespace kaiair {
+ struct pktr_settings {
+   /// Whether the PktR feedback view is printed.
+   bool enabled = false;
++  /// Whether PktR actuates UL power control (adds the Cantelli cushion to the stock SINR target).
++  /// Independent of \c enabled so the view and the actuation can be toggled separately for A/B.
++  bool actuate = false;
+   /// IPC parameters (gamma_db, beta, ewma_c).
+   pktr_config ipc{};
+   /// EWMA sigma (dB) above which the view treats the interval as a regime transition and suppresses
+@@ -64,6 +67,7 @@ inline pktr_settings load_pktr_settings()
+ {
+   pktr_settings s;
+   s.enabled            = env_flag("KAIAIR_PKTR_METRICS");
++  s.actuate            = env_flag("KAIAIR_PKTR_ACTUATE");
+   s.ipc.gamma_db       = env_float("KAIAIR_PKTR_GAMMA_DB", s.ipc.gamma_db);
+   s.ipc.beta           = std::clamp(env_float("KAIAIR_PKTR_BETA", s.ipc.beta), 0.0F, 0.999999F);
+   s.ipc.ewma_c         = std::clamp(env_float("KAIAIR_PKTR_EWMA_C", s.ipc.ewma_c), 0.0F, 0.999999F);
+@@ -80,5 +84,27 @@ inline const pktr_settings& pktr_runtime()
+   return s;
+ }
+ 
++/// Adaptive UL SINR-target offset (dB) that PktR adds on top of the stock power-control target: the
++/// Cantelli reliability cushion sigma*k(beta). This raises the closed-loop SINR target so the
++/// beta-quantile of the SINR distribution (not just its mean) clears the operator's base target.
++///
++/// Returns 0 (i.e. fall back to the stock target) when actuation is disabled, the link has no
++/// statistics yet, or sigma is in the regime-transition zone, a transient or stale sigma spike must
++/// never over-drive UL power (the bistable-link safety finding). This is the single home of the
++/// IPC-UL actuation policy.
++inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls, const pktr_settings& s)
++{
++  if (not s.actuate or not ls.has_samples() or ls.std_ni_db() > s.sigma_transient_db) {
++    return 0.0F;
++  }
++  return ls.std_ni_db() * cantelli_sigma_factor(s.ipc.beta);
++}
++
++/// Convenience overload using the process-wide settings.
++inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls)
++{
++  return pktr_ul_sinr_offset_db(ls, pktr_runtime());
++}
++
+ } // namespace kaiair
+ } // namespace ocudu
+diff --git a/lib/scheduler/support/pusch_power_controller.cpp b/lib/scheduler/support/pusch_power_controller.cpp
+index dc740ef8c0..075adc376d 100644
+--- a/lib/scheduler/support/pusch_power_controller.cpp
++++ b/lib/scheduler/support/pusch_power_controller.cpp
+@@ -144,7 +144,8 @@ unsigned pusch_power_controller::adapt_pusch_prbs_to_phr(unsigned nof_prbs) cons
+   return std::min(nof_prbs, static_cast<unsigned>(std::floor(estimated_nof_prbs)));
+ }
+ 
+-uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot)
++// KaiAir/PktR: pktr_sinr_target_offset_db is the adaptive Cantelli cushion added to the SINR target.
++uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot, float pktr_sinr_target_offset_db)
+ {
+   static constexpr uint8_t default_tpc = 1;
+ 
+@@ -166,8 +167,9 @@ uint8_t pusch_power_controller::compute_tpc_command(slot_point pusch_slot)
+       (1.0f - alpha_fractional_pl) *
+       (ref_path_loss_for_target_sinr - latest_phr.value().phr_data_for_pw_ctrl.value().latest_path_loss_db);
+ 
+-  float sinr_to_target_diff =
+-      pusch_sinr_target_dB + fract_pl_compensation - channel_state_manager.get_pusch_average_sinr();
++  // KaiAir/PktR: lift the SINR target by the adaptive Cantelli cushion (0 = stock behaviour).
++  float sinr_to_target_diff = pusch_sinr_target_dB + pktr_sinr_target_offset_db + fract_pl_compensation -
++                              channel_state_manager.get_pusch_average_sinr();
+ 
+   // To prevent that the next PHR is negative (assuming p_cmax and the path-loss do not change over time), the
+   // following inequality needs to be met.
+diff --git a/lib/scheduler/support/pusch_power_controller.h b/lib/scheduler/support/pusch_power_controller.h
+index 6bab0151fe..d715ea6ccd 100644
+--- a/lib/scheduler/support/pusch_power_controller.h
++++ b/lib/scheduler/support/pusch_power_controller.h
+@@ -36,7 +36,9 @@ public:
+   unsigned adapt_pusch_prbs_to_phr(unsigned nof_prbs) const;
+ 
+   /// Compute the TPC command for the PUSCH with the objective set to reach the target SINR.
+-  uint8_t compute_tpc_command(slot_point pusch_slot);
++  /// \param pktr_sinr_target_offset_db KaiAir/PktR adaptive offset added on top of the configured SINR
++  /// target (the Cantelli reliability cushion sigma*k(beta)); 0 = stock behaviour.
++  uint8_t compute_tpc_command(slot_point pusch_slot, float pktr_sinr_target_offset_db = 0.0F);
+ 
+ private:
+   /// This variable defines how many PUSCH PRB allocations needs to be stored in the internal ring-buffer; it is the
+diff --git a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+index cede450792..87a5204d06 100644
+--- a/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
++++ b/lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp
+@@ -3,6 +3,7 @@
+ // Portions of this file may implement 3GPP specifications, which may be subject to additional licensing requirements.
+ 
+ #include "ue_cell_grid_allocator.h"
++#include "../kaiair/pktr_runtime_config.h" // KaiAir/PktR: adaptive UL SINR-target offset
+ #include "../support/dci_builder.h"
+ #include "../support/pucch/pucch_k1_helper.h"
+ #include "../ue_context/ue_drx_controller.h"
+@@ -759,8 +760,11 @@ void ue_cell_grid_allocator::set_pusch_params(ul_grant_info& grant, const vrb_in
+ 
+   // Compute TPC command before computing the nof_prbs adaptation based on PHR; this is because, when the TPC gets
+   // computed, the channel state manager will update close-loop power control adjustment.
+-  const uint8_t tpc_command = ue_cc.get_pusch_power_controller().compute_tpc_command(
+-      pdcch_alloc.slot + pusch_td_cfg.k2 + cell_cfg.ntn_cs_koffset);
++  // KaiAir/PktR: add the adaptive Cantelli reliability cushion to the UL SINR target (returns 0
++  // unless KAIAIR_PKTR_ACTUATE is set and the interference statistics are steady).
++  const float   pktr_sinr_offset = kaiair::pktr_ul_sinr_offset_db(ue_cc.get_pktr_link_state());
++  const uint8_t tpc_command      = ue_cc.get_pusch_power_controller().compute_tpc_command(
++      pdcch_alloc.slot + pusch_td_cfg.k2 + cell_cfg.ntn_cs_koffset, pktr_sinr_offset);
+ 
+   // Check if is possible to allocate an aperiodic SRS.
+   // NOTE: if the prohibit time is not set, the scheduler doesn't allocate any aperiodic SRS.
+diff --git a/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp b/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+index 540c04b00a..f1e77bdc26 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_runtime_config_test.cpp
+@@ -90,3 +90,63 @@ TEST(pktr_runtime_config_test, metrics_flag_requires_one)
+   EXPECT_TRUE(detail::load_pktr_settings().enabled);
+   clear_env();
+ }
++
++// Helpers to build a link state with a known sigma regime.
++namespace {
++
++pktr_settings actuating_settings(float beta = 0.9F, float sigma_transient_db = 6.0F)
++{
++  pktr_settings s;
++  s.actuate            = true;
++  s.ipc.beta           = beta;
++  s.sigma_transient_db = sigma_transient_db;
++  return s;
++}
++
++// A link with a small, steady sigma (jitter +/-1 dB).
++pktr_link_state steady_link()
++{
++  pktr_link_state ls;
++  for (int i = 0; i < 200; ++i) {
++    ls.push_ul_measurement(/*sinr_db=*/0.0F, /*rsrp_db=*/(i % 2 == 0) ? 1.0F : -1.0F); // NI = +/-1
++  }
++  return ls;
++}
++
++} // namespace
++
++// Actuation off => no offset, regardless of the link statistics.
++TEST(pktr_runtime_config_test, offset_zero_when_actuation_disabled)
++{
++  pktr_settings s = actuating_settings();
++  s.actuate       = false;
++  EXPECT_FLOAT_EQ(pktr_ul_sinr_offset_db(steady_link(), s), 0.0F);
++}
++
++// No samples yet => no offset (don't act on an empty estimator).
++TEST(pktr_runtime_config_test, offset_zero_without_samples)
++{
++  pktr_link_state empty;
++  EXPECT_FLOAT_EQ(pktr_ul_sinr_offset_db(empty, actuating_settings()), 0.0F);
++}
++
++// Steady sigma => offset is exactly the Cantelli cushion sigma*k(beta).
++TEST(pktr_runtime_config_test, offset_is_cantelli_cushion_when_steady)
++{
++  const pktr_settings s  = actuating_settings(/*beta=*/0.9F);
++  pktr_link_state     ls = steady_link();
++  ASSERT_LE(ls.std_ni_db(), s.sigma_transient_db);
++  const float expected = ls.std_ni_db() * cantelli_sigma_factor(s.ipc.beta);
++  EXPECT_NEAR(pktr_ul_sinr_offset_db(ls, s), expected, 1e-4F);
++  EXPECT_GT(pktr_ul_sinr_offset_db(ls, s), 0.0F);
++}
++
++// sigma in the regime-transition zone => offset suppressed (the safety guard).
++TEST(pktr_runtime_config_test, offset_suppressed_on_sigma_spike)
++{
++  pktr_link_state ls;
++  ls.push_ul_measurement(0.0F, 0.0F);   // NI = 0
++  ls.push_ul_measurement(0.0F, 100.0F); // NI = 100 -> huge transient sigma
++  ASSERT_GT(ls.std_ni_db(), 6.0F);
++  EXPECT_FLOAT_EQ(pktr_ul_sinr_offset_db(ls, actuating_settings(0.9F, 6.0F)), 0.0F);
++}

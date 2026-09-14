@@ -1,0 +1,250 @@
+From 2d11d7c06491ed5274d98ed0a5cde5944eaa6755 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 30 Jun 2026 18:17:04 -0500
+Subject: [PATCH 03/12] kaiair: UL closed-loop power control, apply TPC at the
+ nrUE PHY (fix #830)
+
+Stock OAI nrUE decodes the DCI TPC but never applies it (open-loop PUSCH),
+so the gNB UL power-control loop never closes. Implement the UE side behind
+KAIAIR_UL_PWR_APPLY (default off = bit-for-bit stock):
+
+- nr_ue_scheduler.c: stop zeroing the decoded delta_pusch (gated) so it flows
+  into the f_b_f_c accumulator; pass &pcmax to expose P_CMAX.
+- nr_ue_power_procedures.c + mac_proto.h: get_pusch_tx_power_ue() returns P_CMAX
+  via a new out-param.
+- fapi_nr_ue_interface.h: carry pcmax_dBm on the PUSCH PDU (rides the MAC->PHY copy).
+- nr_ulsch_ue.c: scale PUSCH symbol amplitude (data + DMRS + PT-RS) from the
+  absolute tx_power via 10^((tx_power-P_CMAX)/20) (Option B; AMP == P_CMAX full
+  scale), with a -20 dB safety floor. apply=0 keeps the legacy path identical.
+
+HW-verified on ARA (X310 gNB + B210 UE): gNB drives the UE from max down to a
+regulated operating point via standard 3GPP TPC; UL SINR tracks the Cantelli
+target. Both raise and lower directions confirmed.
+---
+ .../nfapi/public_inc/fapi_nr_ue_interface.h   |  1 +
+ openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c    | 61 ++++++++++++++++---
+ openair2/LAYER2/NR_MAC_UE/mac_proto.h         |  3 +-
+ .../LAYER2/NR_MAC_UE/nr_ue_power_procedures.c |  5 +-
+ openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c   | 17 +++++-
+ 5 files changed, 76 insertions(+), 11 deletions(-)
+
+diff --git a/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h b/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
+index b66fdc9b41..e47b8e3fcc 100644
+--- a/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
++++ b/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
+@@ -369,6 +369,7 @@ typedef struct
+   nfapi_nr_ue_ul_beamforming_t beamforming;
+   //OAI specific
+   int16_t tx_power;
++  int16_t pcmax_dBm; // KaiAir/PktR: P_CMAX reference (dBm at full digital scale) for PHY dBm->amplitude UL power control
+   fapi_nr_tx_request_body_t tx_request_body;
+ } nfapi_nr_ue_pusch_pdu_t;
+ 
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c b/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
+index de339fe0b2..c542c6a517 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_ulsch_ue.c
+@@ -26,6 +26,7 @@
+ #include <openair2/UTIL/OPT/opt.h>
+ #include "PHY/NR_UE_TRANSPORT/pucch_nr.h"
+ #include <math.h>
++#include <stdlib.h> // KaiAir/PktR: getenv/atoi for the UL power-control apply toggle
+ 
+ #define MAX_RE_PER_SYMBOL_IN_ALLOC (275 * 12)
+ #define MAX_NLQM (4 * 8)
+@@ -286,6 +287,7 @@ typedef struct {
+   pusch_dmrs_type_t dmrs_type;
+   unsigned int delta;
+   unsigned int num_cdm_no_data;
++  int amp; // KaiAir/PktR: UL power-controlled reference amplitude for DMRS/PT-RS (==AMP when apply=0)
+ } nr_phy_pxsch_params_t;
+ 
+ /*
+@@ -418,13 +420,14 @@ static void dmrs_amp_mult(const int Wt,
+                           c16_t *mod_dmrs_out,
+                           const uint32_t n_dmrs,
+                           const pusch_dmrs_type_t dmrs_type,
+-                          const unsigned int num_cdm_groups_no_data)
++                          const unsigned int num_cdm_groups_no_data,
++                          const int amp) // KaiAir/PktR: UL power-controlled reference amplitude (==AMP when apply=0)
+ {
+   float beta_dmrs_pusch = get_beta_dmrs(num_cdm_groups_no_data, dmrs_type == pusch_dmrs_type2);
+   /* short array that hold amplitude for k_prime = 0 and k_prime = 1 */
+   int32_t alpha_dmrs[2] __attribute((aligned(16)));
+   for (int_fast8_t i = 0; i < sizeofArray(alpha_dmrs); i++) {
+-    const int32_t a = Wf[i] * Wt * AMP;
++    const int32_t a = Wf[i] * Wt * amp; // KaiAir/PktR: was AMP; now UL power-controlled
+     alpha_dmrs[i] = a * beta_dmrs_pusch;
+   }
+ 
+@@ -470,17 +473,17 @@ static void map_symbols(const nr_phy_pxsch_params_t p,
+       c16_t mod_dmrs[ALNARS_16_4(n_dmrs)] __attribute((aligned(16)));
+       if (p.transform_precoding == transformPrecoder_disabled) {
+         nr_modulation(gold, n_dmrs * 2, DMRS_MOD_ORDER, (int16_t *)mod_dmrs);
+-        dmrs_amp_mult(p.Wt[dmrs_symb_idx % 2], p.Wf, mod_dmrs, mod_dmrs_amp, n_dmrs, p.dmrs_type, p.num_cdm_no_data);
++        dmrs_amp_mult(p.Wt[dmrs_symb_idx % 2], p.Wf, mod_dmrs, mod_dmrs_amp, n_dmrs, p.dmrs_type, p.num_cdm_no_data, p.amp);
+       } else {
+-        dmrs_amp_mult(p.Wt[dmrs_symb_idx % 2], p.Wf, dmrs_seq, mod_dmrs_amp, n_dmrs, p.dmrs_type, p.num_cdm_no_data);
++        dmrs_amp_mult(p.Wt[dmrs_symb_idx % 2], p.Wf, dmrs_seq, mod_dmrs_amp, n_dmrs, p.dmrs_type, p.num_cdm_no_data, p.amp);
+       }
+       dmrs_symb_idx++;
+     } else if ((p.pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS) && ptrs_symbol) {
+       AssertFatal(p.transform_precoding == transformPrecoder_disabled, "PTRS NOT SUPPORTED IF TRANSFORM PRECODING IS ENABLED\n");
+       c16_t mod_ptrs[ALNARS_16_4(p.nb_rb)] __attribute((aligned(16)));
+       nr_modulation(gold, p.nb_rb, DMRS_MOD_ORDER, (int16_t *)mod_ptrs);
+-      const unsigned int beta_ptrs = 1; // temp value until power control is implemented
+-      mult_complex_vector_real_scalar(mod_ptrs, beta_ptrs * AMP, mod_ptrs_amp, p.nb_rb);
++      const unsigned int beta_ptrs = 1; // PT-RS-to-data EPRE ratio (1 == flat)
++      mult_complex_vector_real_scalar(mod_ptrs, beta_ptrs * p.amp, mod_ptrs_amp, p.nb_rb); // KaiAir/PktR: was AMP
+     }
+     map_current_symbol(p,
+                        dmrs_symbol,
+@@ -1110,6 +1113,41 @@ void nr_ue_ulsch_procedures(PHY_VARS_NR_UE *UE,
+   uint32_t tb_size = pusch_pdu->pusch_data.tb_size;
+   uint16_t rnti = pusch_pdu->rnti;
+ 
++  // KaiAir/PktR: UL closed-loop power control. Map the MAC's absolute PUSCH tx_power (dBm) to a
++  // digital-amplitude backoff from full scale, using P_CMAX as the full-scale reference
++  // (tx_power==P_CMAX -> scale 1.0 -> identical to legacy behaviour). power ~ amplitude^2.
++  // Applied to data + DMRS + PT-RS together to preserve EPRE. apply=0 is bit-for-bit stock.
++  static int kaiair_ul_pwr_apply = -1;
++  if (kaiair_ul_pwr_apply < 0) {
++    const char *kaiair_e = getenv("KAIAIR_UL_PWR_APPLY");
++    kaiair_ul_pwr_apply = (kaiair_e && atoi(kaiair_e) != 0) ? 1 : 0;
++  }
++  float kaiair_scale_raw = powf(10.0f, (pusch_pdu->tx_power - pusch_pdu->pcmax_dBm) / 20.0f);
++  if (kaiair_scale_raw > 1.0f)
++    kaiair_scale_raw = 1.0f; // tx_power<=P_CMAX by construction; guard rounding/clip above full scale
++  if (kaiair_scale_raw < 0.0f)
++    kaiair_scale_raw = 0.0f;
++  // Safety floor (-20 dB): closed-loop backoff is bounded, so never let the RA/init transient or a
++  // runaway pull the link below this. floor = 10^(-20/20) = 0.1.
++  static const float kaiair_pwr_floor = 0.1f;
++  // When not applying, force scale 1.0 so amp==AMP and data is untouched (bit-for-bit stock).
++  const float kaiair_scale_eff = kaiair_ul_pwr_apply ? fmaxf(kaiair_scale_raw, kaiair_pwr_floor) : 1.0f;
++  const int kaiair_amp = (int)lroundf((float)AMP * kaiair_scale_eff); // for DMRS/PT-RS (AMP-referenced)
++  // Q15 multiplier for data symbols (mod-table-referenced); clamp below 1.0 to avoid int16 overflow.
++  const int16_t kaiair_data_q15 = (int16_t)lroundf(fminf(kaiair_scale_eff, 0.999969f) * 32768.0f);
++  static uint32_t kaiair_pusch_cnt = 0;
++  if ((kaiair_pusch_cnt++ % 100) == 0)
++    LOG_I(PHY,
++          "[KaiAir/PktR UL-pwr] rnti=%04x tx_power=%d dBm P_CMAX=%d dBm scale=%.4f eff=%.4f AMP=%d amp=%d apply=%d\n",
++          rnti,
++          pusch_pdu->tx_power,
++          pusch_pdu->pcmax_dBm,
++          kaiair_scale_raw,
++          kaiair_scale_eff,
++          (int)AMP,
++          kaiair_amp,
++          kaiair_ul_pwr_apply);
++
+   for (int i = start_symbol; i < start_symbol + number_of_symbols; i++) {
+     was_symbol_used[i] = true;
+     if ((ul_dmrs_symb_pos >> i) & 0x01)
+@@ -1326,6 +1364,14 @@ void nr_ue_ulsch_procedures(PHY_VARS_NR_UE *UE,
+                 mod_order,
+                 (int16_t *)d_mod);
+ 
++  // KaiAir/PktR: scale data symbols by the UL power-control factor (same factor as DMRS/PT-RS amp,
++  // so EPRE is preserved). Skipped when apply=0 to keep the legacy path bit-for-bit identical.
++  if (kaiair_ul_pwr_apply) {
++    const uint32_t kaiair_nsym = available_bits / mod_order;
++    for (uint32_t kaiair_i = 0; kaiair_i < kaiair_nsym; kaiair_i++)
++      d_mod[kaiair_i] = c16mulRealShift(d_mod[kaiair_i], kaiair_data_q15, 15);
++  }
++
+   /////////////////////////ULSCH layer mapping/////////////////////////
+ 
+   const int sz = available_bits / mod_order / Nl;
+@@ -1440,7 +1486,8 @@ void nr_ue_ulsch_procedures(PHY_VARS_NR_UE *UE,
+                                     .num_symbols = number_of_symbols,
+                                     .dmrs_type = dmrs_type,
+                                     .delta = delta,
+-                                    .num_cdm_no_data = cdm_grps_no_data};
++                                    .num_cdm_no_data = cdm_grps_no_data,
++                                    .amp = kaiair_amp}; // KaiAir/PktR: UL power-controlled DMRS/PT-RS amplitude
+ 
+     map_symbols(params, slot, dmrs_seq, data, tx_precoding[nl]);
+ 
+diff --git a/openair2/LAYER2/NR_MAC_UE/mac_proto.h b/openair2/LAYER2/NR_MAC_UE/mac_proto.h
+index c4ba3cb460..609fca22cf 100644
+--- a/openair2/LAYER2/NR_MAC_UE/mac_proto.h
++++ b/openair2/LAYER2/NR_MAC_UE/mac_proto.h
+@@ -177,7 +177,8 @@ int get_pusch_tx_power_ue(
+   uint32_t sum_bits_in_codeblocks,
+   int delta_pusch,
+   bool is_rar_tx_retx,
+-  bool transform_precoding);
++  bool transform_precoding,
++  int *pcmax_out); // KaiAir/PktR: out P_CMAX (dBm) so PHY can map dBm->digital amplitude
+ 
+ int get_srs_tx_power_ue(NR_UE_MAC_INST_t *mac,
+                         NR_SRS_Resource_t *srs_resource,
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c
+index 177ddf7b1d..e76b9957e9 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c
+@@ -433,7 +433,8 @@ int get_pusch_tx_power_ue(NR_UE_MAC_INST_t *mac,
+                           uint32_t sum_bits_in_codeblocks,
+                           int delta_pusch,
+                           bool is_rar_tx_retx,
+-                          bool transform_precoding)
++                          bool transform_precoding,
++                          int *pcmax_out) // KaiAir/PktR: out P_CMAX (dBm) for PHY dBm->amplitude mapping
+ {
+   LOG_D(NR_MAC,
+         "PUSCH tx power determination num_rb=%d start_prb=%d nb_symb_sch=%u nb_dmrs_prb=%u nb_ptrs_prb=%u Qm=%u R= %u "
+@@ -565,6 +566,8 @@ int get_pusch_tx_power_ue(NR_UE_MAC_INST_t *mac,
+         alpha * pathloss,
+         DELTA_TF,
+         f_b_f_c);
++  if (pcmax_out) // KaiAir/PktR: expose P_CMAX so PHY can use it as the dBm->digital-amplitude full-scale reference
++    *pcmax_out = P_CMAX;
+   return min(P_CMAX, P_O_PUSCH + M_pusch_component + alpha * pathloss + DELTA_TF + f_b_f_c);
+ }
+ 
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c
+index 26ce0e5037..90332ddcdf 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_scheduler.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <stdio.h>
++#include <stdlib.h> // KaiAir/PktR: getenv/atoi for the UL power-control apply toggle
+ #include <math.h>
+ #include <pthread.h>
+ 
+@@ -803,10 +804,20 @@ int nr_config_pusch_pdu(NR_UE_MAC_INST_t *mac,
+       delta_pusch = table_38_213_7_1_1_1[0][dci->tpc];
+     }
+   }
+-  delta_pusch = 0; // set to 0 as a workaround for PHY not applying PUSCH tx power
++  // KaiAir/PktR: the legacy workaround zeroed the decoded TPC because the PHY ignored tx_power.
++  // With KAIAIR_UL_PWR_APPLY=1 the PHY scales symbol amplitude from tx_power, so let the decoded
++  // delta flow into the accumulator (f_b_f_c) to close the UL closed-loop power-control loop.
++  static int kaiair_ul_pwr_apply = -1;
++  if (kaiair_ul_pwr_apply < 0) {
++    const char *kaiair_e = getenv("KAIAIR_UL_PWR_APPLY");
++    kaiair_ul_pwr_apply = (kaiair_e && atoi(kaiair_e) != 0) ? 1 : 0;
++  }
++  if (!kaiair_ul_pwr_apply)
++    delta_pusch = 0; // legacy behaviour: discard TPC -> open-loop UL (bit-for-bit stock)
+ 
+   bool is_rar_tx_retx = rnti_type == TYPE_TC_RNTI_;
+ 
++  int pcmax_dBm = 0; // KaiAir/PktR: receives P_CMAX so PHY can map dBm->digital amplitude (UL power control)
+   pusch_config_pdu->tx_power = get_pusch_tx_power_ue(mac,
+                                                      pusch_config_pdu->rb_size,
+                                                      pusch_config_pdu->rb_start,
+@@ -819,7 +830,9 @@ int nr_config_pusch_pdu(NR_UE_MAC_INST_t *mac,
+                                                      pusch_config_pdu->pusch_data.tb_size << 3,
+                                                      delta_pusch,
+                                                      is_rar_tx_retx,
+-                                                     pusch_config_pdu->transform_precoding);
++                                                     pusch_config_pdu->transform_precoding,
++                                                     &pcmax_dBm);
++  pusch_config_pdu->pcmax_dBm = pcmax_dBm; // KaiAir/PktR: full-scale reference for PHY UL power control
+ 
+   pusch_config_pdu->ldpcBaseGraph = get_BG(pusch_config_pdu->pusch_data.tb_size << 3, pusch_config_pdu->target_code_rate);
+ 

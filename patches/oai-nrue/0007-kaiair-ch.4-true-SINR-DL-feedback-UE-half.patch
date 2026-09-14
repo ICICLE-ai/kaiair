@@ -1,0 +1,342 @@
+From 68c95afbfe67dbdf3a0ee78446d3f3373aaee4d6 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 11 Aug 2026 12:24:39 -0500
+Subject: [PATCH 07/12] kaiair: ch.4 true-SINR DL feedback (UE half)
+
+- nr_pdsch_data_rssi (Eq. 4.52/4.53) + nr_measure_interference (Eq. 4.54/4.55)
+  in nr_dlsch_demodulation.c: slot-level PDSCH-data RSSI (data REs only) and
+  unused-RB interference from post-FFT samples, finalized at last PDSCH symbol
+- measurements ride the CSI MEAS_IND (fapi_nr_l1_measurements_t) into MAC
+  csirs_measurements
+- KAIAIR_CH4_CSI=1: nr_get_csi_payload returns the custom 10-bit payload
+  (5-bit qRSSI + 5-bit qI, LSB-first Eq. 4.56, reverse_bits before PUCCH);
+  nr_get_csi_bitlen forces 10 so PRB sizing matches the gNB
+- quantization q=round((dB-REF)/STEP) clamped [0,31]; REF/STEP env-tunable
+  (bench: REF 20, STEP 2, clip-free at observed 44-67 dB levels)
+---
+ .../nfapi/public_inc/fapi_nr_ue_interface.h   |  7 +-
+ openair1/PHY/NR_UE_TRANSPORT/csi_rx.c         |  9 ++
+ .../NR_UE_TRANSPORT/nr_dlsch_demodulation.c   | 91 +++++++++++++++++++
+ openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c | 11 +++
+ openair2/LAYER2/NR_MAC_UE/mac_defs.h          |  4 +
+ openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c  | 58 ++++++++++++
+ radio/USRP/usrp_lib.cpp                       | 17 +++-
+ 7 files changed, 192 insertions(+), 5 deletions(-)
+
+diff --git a/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h b/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
+index e47b8e3fcc..2d9991f24b 100644
+--- a/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
++++ b/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
+@@ -55,12 +55,17 @@ typedef struct {
+   bool is_neighboring_cell;
+   int ssb_index;
+   int rsrp_dBm;
+-  float sinr_dB;  
++  float sinr_dB;
+   uint8_t rank_indicator;
+   uint16_t i1;
+   uint8_t i2;
+   uint8_t cqi;
+   rlm_t radiolink_monitoring;
++  /* KaiAir ch.4 true-SINR DL feedback: slot-level PDSCH data RSSI and unused-RB interference
++     measured in the PDSCH demodulator (relative digital dB). */
++  float kaiair_pdsch_rssi_db;
++  float kaiair_intf_db;
++  uint8_t kaiair_meas_valid;
+ } fapi_nr_l1_measurements_t;
+ 
+ typedef struct {
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c b/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c
+index b15b5ce56c..fc5acefa48 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c
+@@ -946,6 +946,12 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
+   if (!ue->if_inst || !ue->if_inst->dl_indication)
+     return;
+ 
++  // KaiAir ch.4 true-SINR DL feedback: latest slot-level PDSCH RSSI / unused-RB interference from
++  // the PDSCH demodulator (nr_dlsch_demodulation.c), piggy-backed on the CSI measurement indication
++  // so the MAC-side custom CSI payload builder always has fresh values.
++  extern volatile float kaiair_pdsch_rssi_db, kaiair_pdsch_intf_db;
++  extern volatile int kaiair_pdsch_meas_valid;
++
+   fapi_nr_l1_measurements_t l1_measurements = {
+     .gNB_index = proc->gNB_id,
+     .meas_type = NFAPI_NR_CSI_MEAS,
+@@ -957,6 +963,9 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
+     .i2 = *i2,
+     .cqi = cqi,
+     .radiolink_monitoring = RLM_no_monitoring, // TODO do be activated in case of RLM based on CSI-RS
++    .kaiair_pdsch_rssi_db = kaiair_pdsch_rssi_db, // KaiAir ch.4
++    .kaiair_intf_db = kaiair_pdsch_intf_db,       // KaiAir ch.4
++    .kaiair_meas_valid = (uint8_t)kaiair_pdsch_meas_valid, // KaiAir ch.4
+   };
+   nr_downlink_indication_t dl_indication;
+   fapi_nr_rx_indication_t rx_ind = {0};
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+index 9b94dd54aa..34296159ce 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+@@ -29,6 +29,66 @@
+ #define print_ints(s,x) printf("%s = %d %d %d %d\n",s,(x)[0],(x)[1],(x)[2],(x)[3])
+ #define print_shorts(s,x) printf("%s = [%d+j*%d, %d+j*%d, %d+j*%d, %d+j*%d]\n",s,(x)[0],(x)[1],(x)[2],(x)[3],(x)[4],(x)[5],(x)[6],(x)[7])
+ 
++// ---------------------------------------------------------------------------------------------
++// KaiAir ch.4 true-SINR DL feedback (thesis §4.5.1/§4.5.2): slot-level PDSCH data RSSI
++// (Eq. 4.52/4.53) and unused-RB interference (Eq. 4.54/4.55), measured from the post-FFT
++// frequency-domain samples Y_{k,s} during PDSCH demodulation. Single-UE process => one global
++// accumulator; reset at the first PDSCH symbol of the slot, finalized at the last. The dB values
++// are in the RELATIVE digital scale, only the difference RSSI - I (the DL SINR) is
++// calibration-free, which is exactly what the gNB consumes.
++typedef struct {
++  double sig_energy; // sum |Y|^2 over scheduled PDSCH DATA REs (DMRS/CSI-RS excluded)
++  uint64_t sig_re_count;
++  double intf_energy; // sum |Y|^2 over REs of RBs unused by the PDSCH allocation
++  uint64_t intf_re_count;
++} kaiair_csi_meas_acc_t;
++
++static kaiair_csi_meas_acc_t kaiair_csi_acc;
++// Latest finalized slot-level measurements (telemetry-grade cross-thread access; the MAC-side
++// CSI payload builder reads these, increment B of the ch.4 feedback chain).
++volatile float kaiair_pdsch_rssi_db = 0.0f;
++volatile float kaiair_pdsch_intf_db = 0.0f;
++volatile int kaiair_pdsch_meas_valid = 0;
++
++// KaiAir ch.4 Eq. (4.52): accumulate |Y|^2 over the scheduled PDSCH data REs of this symbol.
++// rxdataF_ext already holds ONLY data REs (DMRS/CSI-RS stripped by nr_dlsch_extract_rbs).
++static void nr_pdsch_data_rssi(int nbRx, uint32_t rx_size_symbol, c16_t rxdataF_ext[][rx_size_symbol], uint32_t nb_re)
++{
++  for (int aarx = 0; aarx < nbRx; aarx++) {
++    for (uint32_t i = 0; i < nb_re; i++)
++      kaiair_csi_acc.sig_energy += (double)squaredMod(rxdataF_ext[aarx][i]);
++    kaiair_csi_acc.sig_re_count += nb_re;
++  }
++}
++
++// KaiAir ch.4 Eq. (4.54): accumulate |Y|^2 over REs of RBs NOT used by the scheduled PDSCH in
++// this symbol (the interference + noise floor the UE observes). NOTE: bitmap indexing matches the
++// scheduled-RB test used in the CSI-overlap counting above (bench BWPStart = 0).
++static void nr_measure_interference(NR_DL_FRAME_PARMS *fp,
++                                    const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
++                                    const freq_alloc_bitmap_t *freq_alloc,
++                                    uint32_t rxdataF_sz,
++                                    c16_t rxdataF[][rxdataF_sz],
++                                    int symbol)
++{
++  for (int rb = 0; rb < dlsch_config->BWPSize; rb++) {
++    if ((freq_alloc->bitmap[rb / 32] >> (rb % 32)) & 0x01)
++      continue; // RB scheduled for this PDSCH, counted in the RSSI instead
++    const int start_re = (fp->first_carrier_offset + (rb + dlsch_config->BWPStart) * NR_NB_SC_PER_RB) % fp->ofdm_symbol_size;
++    for (int aarx = 0; aarx < fp->nb_antennas_rx; aarx++) {
++      const c16_t *rxF = &rxdataF[aarx][symbol * fp->ofdm_symbol_size];
++      int k = start_re;
++      for (int re = 0; re < NR_NB_SC_PER_RB; re++) {
++        kaiair_csi_acc.intf_energy += (double)squaredMod(rxF[k]);
++        if (++k >= fp->ofdm_symbol_size)
++          k = 0;
++      }
++      kaiair_csi_acc.intf_re_count += NR_NB_SC_PER_RB;
++    }
++  }
++}
++// ---------------------------------------------------------------------------------------------
++
+ static bool overlap_csi_symbol(fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu, int symbol)
+ {
+   int num_l0 [18] = {1, 1, 1, 1, 2, 1, 2, 2, 1, 2, 2, 2, 2, 2, 4, 2, 2, 4};
+@@ -914,6 +974,37 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
+       UEscopeCopyUnsafe(ue, pdschRxdataF, rxdataF_ext[0], size, scope_req->scope_rxdataF_offset, copy_index);
+       scope_req->scope_rxdataF_offset += size;
+     }
++
++    // KaiAir ch.4 true-SINR DL feedback: accumulate this symbol's PDSCH-data RSSI (Eq. 4.52) and
++    // unused-RB interference (Eq. 4.54); finalize the slot-level averages (Eq. 4.53/4.55) at the
++    // last PDSCH symbol so the MAC CSI builder always sees a coherent (RSSI, I) pair.
++    {
++      if (first_symbol_flag)
++        memset(&kaiair_csi_acc, 0, sizeof(kaiair_csi_acc));
++      nr_pdsch_data_rssi(nbRx, rx_size_symbol, rxdataF_ext, nb_re_pdsch);
++      nr_measure_interference(fp, dlsch_config, freq_alloc, fp->samples_per_slot_wCP, rxdataF, symbol);
++      if (symbol == dlsch_config->start_symbol + dlsch_config->number_symbols - 1
++          && kaiair_csi_acc.sig_re_count > 0 && kaiair_csi_acc.intf_re_count > 0) {
++        const float rssi_db = 10.0f * log10f((float)(kaiair_csi_acc.sig_energy / kaiair_csi_acc.sig_re_count) + 1e-3f);
++        const float intf_db = 10.0f * log10f((float)(kaiair_csi_acc.intf_energy / kaiair_csi_acc.intf_re_count) + 1e-3f);
++        kaiair_pdsch_rssi_db = rssi_db;
++        kaiair_pdsch_intf_db = intf_db;
++        kaiair_pdsch_meas_valid = 1;
++        static int kaiair_ch4_dbg = -1;
++        if (kaiair_ch4_dbg < 0)
++          kaiair_ch4_dbg = getenv("KAIAIR_CH4_CSI_DEBUG") ? 1 : 0;
++        if (kaiair_ch4_dbg)
++          LOG_I(PHY,
++                "[KaiAir ch4] %d.%d PDSCH RSSI=%.1f dB (N=%lu) unused-RB I=%.1f dB (N=%lu) -> DL SINR=%.1f dB\n",
++                frame,
++                nr_slot_rx,
++                rssi_db,
++                (unsigned long)kaiair_csi_acc.sig_re_count,
++                intf_db,
++                (unsigned long)kaiair_csi_acc.intf_re_count,
++                rssi_db - intf_db);
++      }
++    }
+     //----------------------------------------------------------
+     //--------------------- Channel Scaling --------------------
+     //----------------------------------------------------------
+diff --git a/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c b/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c
+index 28ba6dddad..5ef5ea352c 100644
+--- a/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c
++++ b/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c
+@@ -4773,6 +4773,17 @@ void compute_csi_bitlen(const NR_CSI_MeasConfig_t *csi_MeasConfig, nr_csi_report
+ 
+ uint16_t nr_get_csi_bitlen(nr_csi_report_t *csi_report)
+ {
++  // KaiAir ch.4 true-SINR DL feedback: the custom 10-bit payload (5-bit PDSCH RSSI + 5-bit
++  // interference) replaces the standard CSI report, so every consumer of the part-1 bit length
++  // (PUCCH PRB sizing, UCI assembly) must see 10. The gNB (ocudu) applies the same fixed size.
++  static int kaiair_ch4 = -1;
++  if (kaiair_ch4 < 0) {
++    const char *e = getenv("KAIAIR_CH4_CSI");
++    kaiair_ch4 = (e && e[0] == '1') ? 1 : 0;
++  }
++  if (kaiair_ch4)
++    return 10;
++
+   uint16_t csi_bitlen = 0;
+   uint16_t max_bitlen = 0;
+   L1_Meas_bitlen_t *CSI_report_bitlen = NULL;
+diff --git a/openair2/LAYER2/NR_MAC_UE/mac_defs.h b/openair2/LAYER2/NR_MAC_UE/mac_defs.h
+index d53f2905d0..ed34580da4 100644
+--- a/openair2/LAYER2/NR_MAC_UE/mac_defs.h
++++ b/openair2/LAYER2/NR_MAC_UE/mac_defs.h
+@@ -416,6 +416,10 @@ typedef struct {
+   uint16_t i1;
+   uint8_t i2;
+   uint8_t cqi;
++  /* KaiAir ch.4 true-SINR DL feedback: PDSCH-data RSSI + unused-RB interference (relative dB). */
++  float kaiair_pdsch_rssi_db;
++  float kaiair_intf_db;
++  uint8_t kaiair_meas_valid;
+ } NR_CSIRS_meas_t;
+ 
+ typedef enum ta_type {
+diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
+index 9afd64223c..953156574f 100644
+--- a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
++++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
+@@ -1571,6 +1571,10 @@ void nr_ue_process_l1_measurements(NR_UE_MAC_INST_t *mac, frame_t frame, int slo
+     mac->csirs_measurements.i2 = l1_measurements->i2;
+     mac->csirs_measurements.cqi = l1_measurements->cqi;
+     mac->csirs_measurements.ri = l1_measurements->rank_indicator;
++    // KaiAir ch.4 true-SINR DL feedback: PDSCH-data RSSI + unused-RB interference from the PHY.
++    mac->csirs_measurements.kaiair_pdsch_rssi_db = l1_measurements->kaiair_pdsch_rssi_db;
++    mac->csirs_measurements.kaiair_intf_db = l1_measurements->kaiair_intf_db;
++    mac->csirs_measurements.kaiair_meas_valid = l1_measurements->kaiair_meas_valid;
+   }
+   nr_mac_rrc_meas_ind_ue(mac->ue_id,
+                          l1_measurements->gNB_index,
+@@ -3078,6 +3082,50 @@ static nfapi_nr_ue_csi_payload_t get_csirs_RSRP_payload(NR_UE_MAC_INST_t *mac,
+   return csi;
+ }
+ 
++// KaiAir ch.4 true-SINR DL feedback (thesis §4.5.3): custom 10-bit CSI payload replacing the
++// standard report, 5-bit quantized PDSCH-data RSSI (bits 0-4) + 5-bit quantized interference
++// (bits 5-9), LSB-first per Eq. (4.56), then bit-reversed so the intended fields survive the
++// PUCCH small-block encoding chain (§4.5.3.2). Quantization: q = round((dB - REF)/STEP) clamped
++// to [0,31]; REF/STEP via KAIAIR_CH4_CSI_REF_DB / KAIAIR_CH4_CSI_STEP_DB (STEP must match the gNB).
++static nfapi_nr_ue_csi_payload_t kaiair_get_ch4_csi_payload(NR_UE_MAC_INST_t *mac)
++{
++  static float kaiair_step_db = -1.0f;
++  static float kaiair_ref_db = 0.0f;
++  if (kaiair_step_db < 0.0f) {
++    const char *s = getenv("KAIAIR_CH4_CSI_STEP_DB");
++    kaiair_step_db = s ? atof(s) : 2.0f;
++    if (kaiair_step_db < 0.25f || kaiair_step_db > 6.0f)
++      kaiair_step_db = 2.0f;
++    const char *r = getenv("KAIAIR_CH4_CSI_REF_DB");
++    kaiair_ref_db = r ? atof(r) : 0.0f;
++  }
++  const int n_bits = 10;
++  const int rsrp_bits = 5;
++  int rsrp_q = (int)lroundf((mac->csirs_measurements.kaiair_pdsch_rssi_db - kaiair_ref_db) / kaiair_step_db);
++  int interf_q = (int)lroundf((mac->csirs_measurements.kaiair_intf_db - kaiair_ref_db) / kaiair_step_db);
++  rsrp_q = rsrp_q < 0 ? 0 : (rsrp_q > 31 ? 31 : rsrp_q);
++  interf_q = interf_q < 0 ? 0 : (interf_q > 31 ? 31 : interf_q);
++  uint16_t payload = 0;
++  payload |= (uint16_t)(rsrp_q & 0x1F);
++  payload |= (uint16_t)((interf_q & 0x1F) << rsrp_bits);
++  uint64_t reversed = reverse_bits((uint64_t)payload, n_bits);
++  static int kaiair_dbg = -1;
++  if (kaiair_dbg < 0)
++    kaiair_dbg = getenv("KAIAIR_CH4_CSI_DEBUG") ? 1 : 0;
++  if (kaiair_dbg)
++    LOG_I(NR_MAC,
++          "[KaiAir ch4] CSI payload: RSSI=%.1f dB -> q=%d, I=%.1f dB -> q=%d, raw=0x%03x rev=0x%03lx (valid=%d)\n",
++          mac->csirs_measurements.kaiair_pdsch_rssi_db,
++          rsrp_q,
++          mac->csirs_measurements.kaiair_intf_db,
++          interf_q,
++          payload,
++          (unsigned long)reversed,
++          mac->csirs_measurements.kaiair_meas_valid);
++  nfapi_nr_ue_csi_payload_t csi = {.part1_payload = reversed, .p1_bits = n_bits, .p2_bits = 0};
++  return csi;
++}
++
+ nfapi_nr_ue_csi_payload_t nr_get_csi_payload(NR_UE_MAC_INST_t *mac,
+                                              int csi_report_id,
+                                              CSI_mapping_t mapping_type,
+@@ -3085,6 +3133,16 @@ nfapi_nr_ue_csi_payload_t nr_get_csi_payload(NR_UE_MAC_INST_t *mac,
+ {
+   AssertFatal(csi_MeasConfig->csi_ReportConfigToAddModList->list.count > 0,"No CSI Report configuration available\n");
+   nfapi_nr_ue_csi_payload_t csi = {0};
++
++  // KaiAir ch.4: replace the standard CSI payload with the custom 10-bit (RSSI, I) report.
++  static int kaiair_ch4 = -1;
++  if (kaiair_ch4 < 0) {
++    const char *e = getenv("KAIAIR_CH4_CSI");
++    kaiair_ch4 = (e && e[0] == '1') ? 1 : 0;
++  }
++  if (kaiair_ch4)
++    return kaiair_get_ch4_csi_payload(mac);
++
+   struct NR_CSI_ReportConfig *csi_reportconfig = csi_MeasConfig->csi_ReportConfigToAddModList->list.array[csi_report_id];
+   NR_CSI_ResourceConfigId_t csi_ResourceConfigId = csi_reportconfig->resourcesForChannelMeasurement;
+   if (csi_reportconfig->ext2 && csi_reportconfig->ext2->reportQuantity_r16) {
+diff --git a/radio/USRP/usrp_lib.cpp b/radio/USRP/usrp_lib.cpp
+index 5b8b34c9ed..1631b63d43 100644
+--- a/radio/USRP/usrp_lib.cpp
++++ b/radio/USRP/usrp_lib.cpp
+@@ -251,13 +251,13 @@ static void trx_usrp_start_interdigital_gpio(openair0_device_t *device, usrp_sta
+   AssertFatal(device->type == USRP_X400_DEV,
+               "interdigital frontend device for beam management can only be used together with an X400\n");
+   // set data direction register (DDR) to output
+-  s->usrp->set_gpio_attr(s->gpio_bank, "DDR", 0xfff, 0xfff);
++  s->usrp->set_gpio_attr(s->gpio_bank, "DDR", 0x7f, 0x7f);
+   // set lower GPIO#1 to be controlled automatically by ATR (the rest  bits are controlled manually)
+-  s->usrp->set_gpio_attr(s->gpio_bank, "CTRL", (1 << 1), (1 << 1));
++  s->usrp->set_gpio_attr(s->gpio_bank, "CTRL", 0x7f, 0x7f);
+   // set GPIO1 (Tx/Rx1)  to 1 for MHU1 for transmistting
+-  s->usrp->set_gpio_attr(s->gpio_bank, "ATR_XX", (1 << 1), (1 << 1));
++  s->usrp->set_gpio_attr(s->gpio_bank, "ATR_XX", 0x7f, 0x7f);
+   // set GPIO4 (ID0) to 1 and GPIO2 (TX/RX2) &GPIO3 (ID1) to 0
+-  s->usrp->set_gpio_attr(s->gpio_bank, "OUT", (1 << 4), 0x1c);
++  //s->usrp->set_gpio_attr(s->gpio_bank, "OUT", (1 << 4), 0x1c);
+ }
+ 
+ static void trx_usrp_start_generic_gpio(usrp_state_t *s)
+@@ -307,6 +307,15 @@ static int trx_usrp_start(openair0_device_t *device)
+       AssertFatal(false, "illegal GPIO controller %d\n", device->openair0_cfg->gpio_controller);
+   }
+ 
++  // Setup for TDD, GPIO(4) = ATR_RX
++  // set data direction register to output
++  s->usrp->set_gpio_attr(s->gpio_bank, "DDR", 0x7f, 0x7f);
++  // set bits to be controlled by ATR
++  s->usrp->set_gpio_attr(s->gpio_bank, "CTRL", 0x7f, 0x7f);
++  // set bits to 1 when radio is transmitting AND reciving (PA control)
++  s->usrp->set_gpio_attr(s->gpio_bank, "ATR_XX", 0x7f, 0x7f);
++
++
+   s->wait_for_first_pps = 1;
+   s->rx_count = 0;
+   s->tx_count = 0;

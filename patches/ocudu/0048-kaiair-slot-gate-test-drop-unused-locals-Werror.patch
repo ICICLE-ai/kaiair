@@ -1,0 +1,25 @@
+From e53388f2c37a96378f0c4ccc65718f9d63c0de57 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Wed, 26 Aug 2026 23:11:43 -0500
+Subject: [PATCH 48/52] kaiair: slot-gate test, drop unused locals (-Werror)
+
+---
+ tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+index d149ffaa09..e21fcfa09a 100644
+--- a/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
++++ b/tests/unittests/scheduler/kaiair/pktr_slot_gate_test.cpp
+@@ -86,10 +86,7 @@ TEST(pktr_slot_gate_test, global_index_cross_cell_agreement)
+   const uint32_t linkA = 0x00020001, linkB = 0x00030002;
+   // Same physical instant: wall clock identical; local counters differ by a large offset.
+   const long long wall_ns  = 1000000000000LL;       // 1e12 ns
+-  const uint32_t  localA   = 863;                    // cell A's frame counter
+-  const uint32_t  localB   = 476;                    // cell B's frame counter (booted later)
+-  // Each cell independently maps its local slot to the global index (offset latched per process;
+-  // emulate two processes by computing the base arithmetic directly).
++  // (cell A frame counter 863, cell B 476, different boots; each maps to the SAME global index)
+   const long long slot_dur = 500000;
+   const long long global   = wall_ns / slot_dur;
+   const uint64_t  gbaseA   = static_cast<uint64_t>(global);       // A: global for its local 863
