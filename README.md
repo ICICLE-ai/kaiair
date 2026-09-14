@@ -13,17 +13,14 @@ on real radios, USRP X310 and B210 deployments on the ARA wireless living lab.
 
 ## What is in this release
 
-
-| Component | Status |
-|---|---|
-| UL per-packet power control | verified |
-| DL per-packet power control | verified |
-| GRK interference model, exclusion-region, K-adaptation | verified |
-| Multi-cell measurement plane (neighbor RSRP via RRC, TDD-reciprocity gain map) | verified |
-| Inter-gNB PktR-Signal exchange over Xn-AP PRIVATE MESSAGE (TS 38.423) | verified |
-| Conflict graph and ONAMA slot gate with off, observe, and enforce modes | verified |
-| Live control plane (HTTP agent plus control-file overlay) | verified |
-| Telemetry (per-link JSON, web dashboard) | verified |
+- UL per-packet power control
+- DL per-packet power control
+- GRK interference model, exclusion-region, K-adaptation
+- Multi-cell measurement plane (neighbor RSRP via RRC, TDD-reciprocity gain map)
+- Inter-gNB PktR-Signal exchange over Xn-AP PRIVATE MESSAGE (TS 38.423)
+- Conflict graph and ONAMA slot gate with off, observe, and enforce modes
+- Live control plane (HTTP agent plus control-file overlay)
+- Telemetry (per-link JSON, web dashboard)
 
 ## Repository layout
 
