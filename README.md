@@ -1,12 +1,15 @@
 # KaiAir
 
-KaiAir brings the PRK family of URLLC algorithms into a working 5G stack. It adds PktR
-per-packet transmission power control, GRK interference modeling with K-adaptation, and
-multi-cell interference coordination built on receiver-centric exclusion regions and ONAMA
-slot scheduling. The gNB side lives inside the [OCUDU](https://github.com/ocudu) O-DU/CU
-stack. A companion patch set for the OAI nrUE adds the fine-grained measurement and
-actuation path we use as a reference arm. All results below were measured on real radios,
-USRP X310 and B210 deployments on the ARA wireless testbed.
+KaiAir is predictable per-packet power control and scheduling implemented in the
+[OCUDU](https://github.com/ocudu) 5G stack. It is based on PktR, the joint scheduling and
+power control approach of Zhibo Meng and Hongwei Zhang, "Joint Scheduling and Power
+Control for Predictable Per-Packet Reliability in URLLC" (Iowa State University). KaiAir
+carries the full PktR machinery, per-packet transmission power control, GRK interference
+modeling with K-adaptation, and multi-cell interference coordination built on
+receiver-centric exclusion regions and ONAMA slot scheduling. A companion patch set for
+the OAI nrUE adds the fine-grained measurement and actuation path we use as a reference
+arm. All results below were measured on real radios, USRP X310 and B210 deployments on
+the ARA wireless testbed.
 
 The goal is easy to state. Hold `Pr{SINR >= gamma} >= beta` for every packet on every
 link, using only mechanisms a real network can deploy. That means standard TPC commands,
