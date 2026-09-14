@@ -10,7 +10,7 @@ component:
     Xn-AP inter-gNB signaling) implemented in the OCUDU 5G stack, with a companion OAI
     nrUE patch set, an HTTP control agent, and a live dashboard. Validated on the ARA
     wireless testbed with USRP radios.
-  owner: Taimoor Ul Islam, Iowa State University
+  owner: Taimoor Ul Islam, Center for Wireless, Communities and Innovation, Iowa State University
   status: AlphaRelease            # reliable, unit-tested, documented; APIs may still move
   primaryThrust: TBD              # suggest DA (use-inspired, ARA/agriculture) or Software
   targetIcicleRelease: TBD
