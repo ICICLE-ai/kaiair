@@ -20,17 +20,10 @@ make -j"$(nproc)" $(ls ../tests/unittests/scheduler/kaiair | grep _test | sed 's
 ctest -R pktr
 ```
 
-Notes from the deployments this was developed on:
+## UE (OAI nrUE + KaiAir patches)
 
-- Containers with a memory cap (cgroup) below ~16 GB cannot sustain `make -j$(nproc)` on
-  the generated ASN.1 translation units. Use `-j8` or lower there.
-- If you sync sources over the network into an existing tree, extract with `tar -xm`. Stale
-  mtimes otherwise produce mixed-object builds.
-
-## UE (OAI nrUE + KaiAir patches, optional)
-
-Only needed for the Tier-B reference arm (exact UL power apply, DL true-SINR feedback).
-Any COTS UE works against the gNB without this. Keep `KAIAIR_DL_SINR_CSI` unset in that
+Only needed for exact UL power apply, DL true-SINR feedback.
+Any COTS UE works with gNB without this. Keep `KAIAIR_DL_SINR_CSI` unset in that
 case, since the custom 10-bit CSI format must not be enabled against a UE that does not
 produce it.
 
@@ -45,8 +38,7 @@ cd cmake_targets && ./build_oai -w USRP --nrUE --ninja
 
 ### gNB YAML
 
-Sample configurations under `configs/`. The KaiAir-relevant keys, beyond a stock cell
-definition:
+Sample configurations under `configs/`. The KaiAir-relevant keys, beyond default configuration:
 
 ```yaml
 ru_sdr:
@@ -75,16 +67,16 @@ cu_cp:
 
 ### Environment knobs (gNB)
 
-The agent (docs/AGENT_API.md) sets all of these for you. They are listed for standalone
+The agent (docs/AGENT_API.md) sets all of these. They are listed for standalone
 runs. Defaults in `lib/scheduler/kaiair/pktr_runtime_config.h`.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `KAIAIR_PKTR_METRICS` | off | enable the KaiAir console feedback view + metrics plumbing |
-| `KAIAIR_PKTR_METRICS_JSON` | unset | path for the 1 Hz telemetry JSON |
+| `KAIAIR_PKTR_METRICS_JSON` | unset | path for the telemetry JSON |
 | `KAIAIR_PKTR_CTRL_FILE` | unset | path of the live control overlay file (enables runtime control) |
-| `KAIAIR_PKTR_GAMMA_DB` | 3.0 | UL SINR target gamma |
-| `KAIAIR_PKTR_DL_GAMMA_DB` | 10.0 | DL SINR target (independent of UL; gamma is per-direction) |
+| `KAIAIR_PKTR_GAMMA_DB` | 10.0 | UL SINR target gamma |
+| `KAIAIR_PKTR_DL_GAMMA_DB` | 10.0 | DL SINR target (independent of UL, gamma is per-direction) |
 | `KAIAIR_PKTR_BETA` | 0.9 | per-packet reliability target |
 | `KAIAIR_PKTR_ACTUATE` / `_DL_ACTUATE` / `_DL_LOOP` | 0 | UL / DL actuation gates (observe-only when 0) |
 | `KAIAIR_PKTR_MIN_CUSHION_DB` | 3.0 | floor on the Cantelli cushion |
@@ -127,30 +119,17 @@ UL SINR statistics are only meaningful under UL traffic. Keep a light keepalive 
 ### Multi-cell
 
 1. Give every radio the shared 10 MHz + PPS and set `clock/sync: external`. Verify the
-   hosts are PTP-disciplined (`adjtimex` status, or compare container clocks directly).
-   ONAMA needs host clocks aligned to well under 500 us.
+   hosts are PTP-disciplined. ONAMA needs host clocks aligned to well under 10 us.
 2. Assign distinct `gnb_id` and `pci` per cell, configure the `cu_cp.mobility` neighbor
    blocks and the `xnap` connections crosswise, and start all gNBs. Confirm the mesh:
    `peer_cells` in the telemetry JSON equals the number of peers.
 3. Attach UEs one cell at a time. Time-synchronized co-channel cells transmit their SSBs
    in the same symbols, so a searching UE near equal-power cells sees a collision. The
-   reliable recipe is to bring a UE up while its non-serving neighbors are quiet (stopped,
-   or paused with SIGSTOP for the ~30 s of acquisition), then restore them, established
-   links survive. Attach order and a few dB of TX asymmetry decide which cell a free UE
+   reliable way is to bring a UE up while its non-serving neighbors are quiet (stopped),
+   then restore them.
+   Attach order and a few dB of TX asymmetry decide which cell a free UE
    picks. Check the UE's serving PCI and retry if it camped wrong.
-4. Coordination runs by itself from there: measurement reports feed the store, records
-   travel over Xn, exclusion regions and conflicts form when there is actual load
-   (activity-weighted), and the gate mode is switched live per cell
+4. Coordination runs by itself from there. Measurement reports
+   travel over Xn, exclusion regions and conflicts form when there is actual load,
+   and the gate mode is switched live per cell
    (`off` / `observe` / `enforce`) through the agent.
-
-### Operational notes that cost us time
-
-- Never SIGKILL a running gNB: stop it gracefully and wait for exit, or the X310 TX can
-  wedge silently until the next clean session.
-- `pusch_sinr_calc_method: channel_estimator` gives usable per-packet UL SINR.
-- Per-session RF calibration on X310/B210 pairs shifts several dB between runs. Never
-  compare absolute RSRP across sessions, and expect UE cell preference at equal power to
-  flip between sessions.
-- On B210 UEs, deep digital UL backoff at full analog gain unmasks the transmitter's own
-  broadband noise. Keep `KAIAIR_UL_PWR_MIN_DB` small (see above). Deeper backoff belongs
-  in analog gain.
