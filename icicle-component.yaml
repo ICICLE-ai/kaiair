@@ -10,18 +10,18 @@ component:
     Xn-AP inter-gNB signaling) implemented in the OCUDU 5G stack, with a companion OAI
     nrUE patch set, an HTTP control agent, and a live dashboard. Validated on the ARA
     wireless testbed with USRP radios.
-  owner: Taimoor Ul Islam, Center for Wireless, Communities and Innovation, Iowa State University
-  status: AlphaRelease            # reliable, unit-tested, documented; APIs may still move
-  primaryThrust: TBD              # suggest DA (use-inspired, ARA/agriculture) or Software
+  owner: Center for Wireless, Communities and Innovation (WiCI), Iowa State University
+  status: AlphaRelease            # reliable, unit-tested, documented, APIs may still evolve
+  primaryThrust: TBD              # Wireless or Software
   targetIcicleRelease: TBD
   website: TBD                    # ICICLE repo URL once created
-  sourceCodeUrl: TBD              # https://github.com/ICICLE-ai/kaiair (requested)
+  sourceCodeUrl: TBD              # https://github.com/ICICLE-ai/kaiair
   componentVersion: "1.0.0"
   licenseUrl: TBD                 # <repo>/blob/main/LICENSE (BSD 3-Clause)
   releaseNotesUrl: TBD            # <repo>/blob/main/CHANGELOG.md
   doi: ""
   citation: TBD                   # PktR / PRKS / LDP-TR papers + KaiAir report
-  artifactOther: patch series against pinned OCUDU and OAI upstreams (see README)
+  artifactOther: patch series against pinned OCUDU and OAI upstreams
   codeReviewConducted: false      # planned before BetaRelease
   testsWritten: true              # 12 gtest suites (ctest -R pktr)
   securityReviewConducted: false

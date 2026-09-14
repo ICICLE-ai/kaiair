@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Applies the KaiAir patch series onto a pristine upstream clone.
+# Applies the KaiAir patch series onto the upstream clone.
 #   ./scripts/apply_patches.sh ocudu /path/to/ocudu
 #   ./scripts/apply_patches.sh oai-nrue /path/to/openairinterface5g
 set -euo pipefail
