@@ -17,7 +17,7 @@ budget, `E_max = S - gamma - sigma*k`. It learns cross-cell gains from neighbor-
 reports through TDD reciprocity, exchanges its link records with peer gNBs over Xn,
 builds a conflict graph, and gates its own scheduler with ONAMA. A deterministic hash of
 the global slot index and the link id picks one winner per conflicting pair per slot,
-with no per-slot message exchange. The heavy work runs on the metrics tick. The scheduler
+without any per-slot message exchange. The heavy work runs on the metrics tick. The scheduler
 slot path only does table lookups.
 
 ```mermaid
@@ -115,8 +115,8 @@ and corrupt foreign-cell DCI is tolerated instead of ending in an assertion exit
 
 ## What runs where, timing-wise
 
-- The slot path (2 kHz) does a mask table lookup and a cushion addition. Constant time,
-  no allocation.
+- The slot path (2 kHz) does a mask table lookup and a cushion addition, in constant time
+  and free of allocation.
 - The metrics tick (1 Hz) does link-state consolidation, the exclusion-region controller
   (regions, conflict graph, ONAMA masks for a 2 s look-ahead window), the telemetry JSON,
   and the Xn record refresh.
