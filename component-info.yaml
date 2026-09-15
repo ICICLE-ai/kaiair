@@ -10,7 +10,7 @@
                 over Xn-AP with ONAMA slot scheduling, validated on the ARA wireless living lab."
   componentVersion: "1.0.0"
   targetIcicleRelease: "2026-09"
-  licenseUrl: "https://github.com/ICICLE-ai/kaiair?tab=LICENSE-ov-file"
+  licenseUrl: "https://github.com/ICICLE-ai/kaiair?tab=BSD-3-Clause-1-ov-file"
   publicAccess: true
   sourceCodeUrl: "https://github.com/ICICLE-ai/kaiair"
   codeReviewConducted: false
