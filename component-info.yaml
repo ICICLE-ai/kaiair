@@ -1,9 +1,13 @@
 - id: "KaiAir:1.0.0"
-  owner: "Taimoor Ul Islam"
+  owner: "WiCI, Iowa State University"
   primaryThrust: "core/CI4AI"
   name: "KaiAir"
   status: "AlphaRelease"
-  description: "Predictable per-packet power control and scheduling for 5G RAN, implemented in the OCUDU stack with a companion OAI nrUE patch set, based on the PktR approach. Provides per-packet Cantelli power control, GRK interference modeling with K-adaptation, and multi-cell coordination over Xn-AP with ONAMA slot scheduling, validated on the ARA wireless living lab."
+  description: "Predictable per-packet power control and scheduling for 5G RAN, 
+                implemented in the OCUDU stack with a companion OAI nrUE patch set. 
+                Provides per-packet Cantelli power control, 
+                GRK interference modeling with K-adaptation, and multi-cell coordination
+                over Xn-AP with ONAMA slot scheduling, validated on the ARA wireless living lab."
   componentVersion: "1.0.0"
   targetIcicleRelease: "2026-09"
   licenseUrl: "https://github.com/ICICLE-ai/kaiair?tab=LICENSE-ov-file"
