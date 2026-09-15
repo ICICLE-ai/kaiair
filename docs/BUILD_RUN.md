@@ -129,10 +129,10 @@ KAIAIR_UL_PWR_APPLY=1 KAIAIR_UL_PWR_MIN_DB=6 KAIAIR_DL_SINR_CSI=1 \
   --ue-fo-compensation -E --ssb 42 --ue-rxgain 120 --usrp-args "serial=<sn>"
 ```
 
-The gNB can also be started by hand, equivalent to what the agent launches:
+The gNB can also be started manually, equivalent to what the agent launches:
 
 ```bash
-cd /path/to/ocudu/build/apps/gnb
+cd <path_to_ocudu>/build/apps/gnb
 
 KAIAIR_PKTR_METRICS=1 \
 KAIAIR_PKTR_GRK=1 \
@@ -165,7 +165,7 @@ Notes for the manual run.
   the reciprocity gain math.
 
 UL SINR statistics are only meaningful under UL traffic. Keep a light keepalive flowing
-(10 Hz ping is enough) or idle readings pin at an estimator artifact.
+(100 Kbps is enough).
 
 ### Multi-cell
 
