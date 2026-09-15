@@ -22,8 +22,8 @@ obtained from the respective upstreams.
 
 ## References
 
-- PktR: Zhibo Meng, Hongwei Zhang, Joint Scheduling and Power Control for Predictable Per-Packet Reliability in URLLC, IEEE International Conference on Network Protocols (ICNP), 2024
-- LDP: Zhibo Meng, Hongwei Zhang, Multi-Cell, Multi-Channel URLLC with Probabilistic Per-Packet Real-Time Guarantee, Technical Report ISU-DNC-TR-2020-01, Iowa State University, 2020
+- &sup1;Zhibo Meng, Hongwei Zhang, Joint Scheduling and Power Control for Predictable Per-Packet Reliability in URLLC, IEEE International Conference on Network Protocols (ICNP), 2024
+- &sup2;Zhibo Meng, Hongwei Zhang, Multi-Cell, Multi-Channel URLLC with Probabilistic Per-Packet Real-Time Guarantee, Technical Report ISU-DNC-TR-2020-01, Iowa State University, 2020
 - [OCUDU](https://github.com/ocudu), the 5G O-DU/CU stack the gNB patch series applies to.
 - [OpenAirInterface 5G RAN](https://gitlab.eurecom.fr/oai/openairinterface5g), the nrUE
   the UE patch series applies to.
