@@ -1,6 +1,7 @@
-# KaiAir multi-cell gNB gnb1, pci 7, gnb_id 411, PLMN 00101/TAC1.
-# SSB-frequency separation: gnb1 SSB @637056, gnb2 @637728, gnb3 @636384 (10.08 MHz apart) so the
-# PPS-aligned cells do NOT collide on the SSB; 40 MHz data carriers still overlap ~30 MHz (co-channel).
+# KaiAir multi-cell gNB example, cell 1 of 3 (pci 7, gnb_id 411, PLMN 00101/TAC1).
+# All cells share the same carrier and SSB frequency (full co-channel reuse, here
+# dl_arfcn 638004 with SSB at 637056). Give each cell its own pci and gnb_id, list the
+# other cells as neighbors, and point the xnap connections at the peer CU-CPs.
 gnb_id: 411
 
 cu_cp:
