@@ -6,21 +6,15 @@ KaiAir runs anywhere OCUDU and OAI run, on bare metal or in containers. The vali
 setup is Ubuntu 24.04 with UHD 4.7 and gcc 13 on the gNB side and Ubuntu 22.04 on the UE
 side, one container per node on the ARA testbed.
 
-The build itself needs nothing special. Radio access does. When running in a container,
-give it a real path to the SDR.
-
 - USRP X310 and N3xx (network attached). The container needs an interface on the radio's
   subnet. A macvlan interface handed into the container works well and is what ARA uses,
-  host networking also works. A default docker bridge does not reach the radio unless you
-  route it explicitly, and the 10GbE MTU and buffer settings apply inside the container.
+  host networking also works.
 - USRP B2xx (USB attached). Pass the USB device through, either the specific
   `/dev/bus/usb` device nodes or a privileged container. A device that re-enumerates
   after a crash gets a new device number, so passing the whole bus is more robust than a
   single node.
 - Multi-cell timing. PTP (ptp4l and phc2sys) runs on the host. Containers share the host
-  kernel clock, so they inherit the discipline with nothing to configure inside. The
-  10 MHz and PPS distribution to the radios is physical cabling and does not involve the
-  container at all.
+  kernel clock, so they inherit the time sync. The 10 MHz and PPS distribution from octoclock to the gNB radios is mandatory (or use external sync through GPSDO).
 
 ## gNB (OCUDU + KaiAir patches)
 
@@ -134,6 +128,41 @@ KAIAIR_UL_PWR_APPLY=1 KAIAIR_UL_PWR_MIN_DB=6 KAIAIR_DL_SINR_CSI=1 \
 ./nr-uesoftmodem -O ue.conf -r 106 --numerology 1 --band 78 -C <freq> \
   --ue-fo-compensation -E --ssb 42 --ue-rxgain 120 --usrp-args "serial=<sn>"
 ```
+
+The gNB can also be started by hand, equivalent to what the agent launches:
+
+```bash
+cd /path/to/ocudu/build/apps/gnb
+
+KAIAIR_PKTR_METRICS=1 \
+KAIAIR_PKTR_GRK=1 \
+KAIAIR_PKTR_BETA=0.9 \
+KAIAIR_PKTR_GAMMA_DB=10 \
+KAIAIR_PKTR_DL_GAMMA_DB=10 \
+KAIAIR_PKTR_ACTUATE=1 \
+KAIAIR_PKTR_DL_ACTUATE=1 \
+KAIAIR_PKTR_DL_LOOP=1 \
+KAIAIR_PKTR_ER_GATE=observe \
+KAIAIR_PKTR_SSB_DBM=16 \
+KAIAIR_PKTR_CTRL_FILE=/tmp/kaiair_ctrl.json \
+KAIAIR_PKTR_METRICS_JSON=/tmp/kaiair_metrics.json \
+KAIAIR_DL_SINR_CSI=1 \
+./gnb -c gnb.yaml
+```
+
+Notes for the manual run.
+
+- Press `t` in the gNB console after start. The metrics printout and the telemetry JSON
+  are gated behind the console metrics toggle, which the agent normally sends for you.
+- `KAIAIR_DL_SINR_CSI=1` only with the patched UE. Leave it out for a COTS UE, otherwise
+  the gNB misreads standard CSI.
+- For an observe-only run set `KAIAIR_PKTR_ACTUATE=0 KAIAIR_PKTR_DL_ACTUATE=0
+  KAIAIR_PKTR_DL_LOOP=0`.
+- `KAIAIR_PKTR_CTRL_FILE` is optional. When set, the values in that file override gamma,
+  power on and off, gate mode and the LDP deadline at runtime, which is how the agent and
+  dashboard steer a running gNB. Without it the env values above are fixed for the run.
+- `KAIAIR_PKTR_SSB_DBM` should match `ssb_block_power_dbm` in the YAML. Peers use it for
+  the reciprocity gain math.
 
 UL SINR statistics are only meaningful under UL traffic. Keep a light keepalive flowing
 (10 Hz ping is enough) or idle readings pin at an estimator artifact.
