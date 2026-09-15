@@ -8,7 +8,7 @@ comment, so running `grep -rn "KaiAir"` over a patched tree enumerates the full 
 
 Each gNB keeps per-link statistics, the interference mean and variance and the per-packet
 SINR. For every packet it computes the transmission power that satisfies
-`Pr{SINR >= gamma} >= beta` through the one-sided Cantelli bound,
+`Pr{SINR >= gamma} >= beta` through the Cantelli bound,
 `P_T = G + I_R + gamma + sigma * sqrt(beta/(1-beta))`. The UL actuator is the standard
 closed-loop TPC command in DCI, which any UE obeys. The DL actuator is the per-PDSCH
 power offset inside the gNB. For multi-cell
@@ -24,8 +24,7 @@ without any per-slot message exchange.
 
 ### Core modules
 
-The algorithm logic is header-only under `lib/scheduler/kaiair/`, kept free of scheduler
-dependencies so each piece unit-tests in isolation.
+Files in `lib/scheduler/kaiair/`.
 
 | File | Contents |
 |---|---|
@@ -46,7 +45,7 @@ Shared headers in `include/ocudu/kaiair/`.
 | File | Contents |
 |---|---|
 | `pktr_neighbor_store.h` | per-UE serving and neighbor RSRP store, fed from CU-CP measurement reports and peer records |
-| `pktr_xn_signal.h` | the PktR-Signal record wire format (cell row, per-link rows, rx-power rows, UL link rows) |
+| `pktr_xn_signal.h` | the PktR-Signal record format (cell row, per-link rows, rx-power rows, UL link rows) |
 
 
 ### Modified upstream files
@@ -57,7 +56,7 @@ Shared headers in `include/ocudu/kaiair/`.
 | UL cushion input | `lib/scheduler/ue_scheduling/ue_cell_grid_allocator.cpp` | per-grant cushion from the link state, and the DL per-UE power offset applied to PDSCH |
 | Link state feed | `lib/scheduler/ue_context/ue_cell.{h,cpp}`, `ue_event_manager.cpp` | per-CRC UL SINR and RSRP into the link state, DL delivery classification |
 | DL feedback | `lib/mac/mac_sched/uci_cell_decoder.cpp`, `lib/ran/csi_report/csi_report_on_pucch_helpers.cpp`, `lib/scheduler/uci_scheduling/uci_indication_selector.*` | 10-bit true-SINR CSI decode (whole-payload bit reversal) and a synthesized CQI so MCS adaptation keeps working |
-| HARQ and LDP | `lib/scheduler/cell/cell_harq_manager.{h,cpp}`, `lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp` | first-transmission timestamps, deadline abandonment, the retransmission cap, urgency ordering (experimental) |
+| HARQ and LDP | `lib/scheduler/cell/cell_harq_manager.{h,cpp}`, `lib/scheduler/ue_scheduling/intra_slice_scheduler.cpp` | first-transmission timestamps, deadline, the retransmission cap, urgency ordering (experimental) |
 | ONAMA gate hooks | `intra_slice_scheduler.cpp` (`can_allocate_pdsch`, `can_allocate_pusch`) | mask lookup, fail-open outside the window |
 | Neighbor measurements | `lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp` | measurement reports into the neighbor store, keyed by serving PCI |
 | Xn exchange | `lib/xnap/xnap_impl.{h,cpp}` | PktR-Signal publish every 500 ms per association, ingest of peer records |
@@ -87,25 +86,15 @@ interference over unused RBs, reporting both in a compact 10-bit CSI on PUCCH.
 | `openair2/LAYER2/NR_MAC_UE/nr_ue_power_procedures.c` | the power computation handed to the PHY apply path |
 | `nfapi/.../fapi_nr_ue_interface.h` | carries transmit power and P_CMAX to the PHY |
 
-The UE also received two robustness fixes needed for multi-cell work. The neighbor-cell
+The UE also has two robustness fixes needed for multi-cell. The neighbor-cell
 PSS search scans a full frame until first acquisition and then uses a tracking window,
 and corrupt foreign-cell DCI is tolerated instead of ending in an assertion exit.
 
-## What runs where
 
-- The slot path does a mask table lookup and a cushion addition, in constant time
-  and free of allocation.
-- The metrics tick does link-state consolidation, the exclusion-region controller
-  (regions, conflict graph, ONAMA masks for a 2 s look-ahead window), the telemetry JSON,
-  and the Xn record refresh.
-- Xn publishes the PktR-Signal every 500 ms per association and ingests peer records.
-- The control overlay is re-read on the tick. Gamma, power on and off, the gate mode and
-  the LDP deadline all change live, without restarting anything.
+## Multi-cell Sync
 
-## Multi-cell timing model
-
-The radios take 10 MHz and PPS from a shared reference, which aligns TDD slot boundaries.
-Every cell must call the same
+The radios take 10 MHz and PPS from a shared reference (e.g., from octoclock in indoor setup),
+which aligns TDD slot boundaries. Every cell must call the same
 physical slot by the same number. KaiAir derives the global index from the
 PTP-disciplined host clock (`wall_ns / slot_duration`), on every tick. The local
 slot counter wraps every 10.24 s and must never be trusted as a long-term reference. Two
