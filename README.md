@@ -59,37 +59,17 @@ https://github.com/ICICLE-ai/kaiair/issues.
 
 ## Install
 
-Clone each upstream at its pinned base and apply the KaiAir patch series.
-
-```bash
-# gNB
-git clone https://github.com/ocudu/ocudu.git
-./scripts/apply_patches.sh ocudu ./ocudu
-cd ocudu && mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && make -j"$(nproc)" gnb
-
-# UE (needed for the full DL true-SINR loop)
-git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git
-./scripts/apply_patches.sh oai-nrue ./openairinterface5g
-cd openairinterface5g/cmake_targets && ./build_oai -w USRP --nrUE --ninja
-```
-
-The full walkthrough, including the host environment,
-configuration, and multi-cell bring-up, is in
+Clone each upstream at its pinned base commit (recorded in `patches/ocudu/BASE` and
+`patches/oai-nrue/BASE`), apply the KaiAir patch series with
+`scripts/apply_patches.sh`, and build. The full walkthrough, including the host
+environment, configuration, and multi-cell bring-up, is in
 [docs/BUILD_RUN.md](docs/BUILD_RUN.md).
 
 ## Run
 
-```bash
-# gNB, through the control agent
-python3 codesign-api/kaiair_agent.py --role gnb --config agent.gnb.json &
-curl -X POST localhost:5000/gnb/start
-
-# dashboard, on your workstation
-python3 dashboard/kaiair_dash.py     # serves http://localhost:8080
-```
-
-The agent HTTP API, the live control-file overlay, the telemetry JSON, and the dashboard
-are documented in [docs/AGENT_API.md](docs/AGENT_API.md).
+The gNB starts through the control agent, and a local web dashboard plots the live
+telemetry. The agent HTTP API, the live control-file overlay, the telemetry JSON, and
+the dashboard are documented in [docs/AGENT_API.md](docs/AGENT_API.md).
 
 ---
 
