@@ -1,5 +1,27 @@
 # Building and running KaiAir
 
+## Host environment
+
+KaiAir runs anywhere OCUDU and OAI run, on bare metal or in containers. The validated
+setup is Ubuntu 24.04 with UHD 4.7 and gcc 13 on the gNB side and Ubuntu 22.04 on the UE
+side, one container per node on the ARA testbed.
+
+The build itself needs nothing special. Radio access does. When running in a container,
+give it a real path to the SDR.
+
+- USRP X310 and N3xx (network attached). The container needs an interface on the radio's
+  subnet. A macvlan interface handed into the container works well and is what ARA uses,
+  host networking also works. A default docker bridge does not reach the radio unless you
+  route it explicitly, and the 10GbE MTU and buffer settings apply inside the container.
+- USRP B2xx (USB attached). Pass the USB device through, either the specific
+  `/dev/bus/usb` device nodes or a privileged container. A device that re-enumerates
+  after a crash gets a new device number, so passing the whole bus is more robust than a
+  single node.
+- Multi-cell timing. PTP (ptp4l and phc2sys) runs on the host. Containers share the host
+  kernel clock, so they inherit the discipline with nothing to configure inside. The
+  10 MHz and PPS distribution to the radios is physical cabling and does not involve the
+  container at all.
+
 ## gNB (OCUDU + KaiAir patches)
 
 ```bash
