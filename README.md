@@ -1,19 +1,15 @@
 # KaiAir
 
 KaiAir is predictable per-packet power control and scheduling implemented in the
-[OCUDU](https://github.com/ocudu) 5G stack. It is based on PktR, the joint scheduling and
-power control approach of Zhibo Meng and Hongwei Zhang, "Joint Scheduling and Power
-Control for Predictable Per-Packet Reliability in URLLC". KaiAir
-implements per-packet transmission power control, GRK interference
+[OCUDU](https://github.com/ocudu) 5G stack. KaiAir brings PktR&sup1; and LDP&sup2; into
+the OCUDU 5G stack, providing per-packet transmission power control, GRK interference
 modeling with K-adaptation, and multi-cell interference coordination built on
 receiver-side exclusion regions and ONAMA slot scheduling. A companion patch set for
-the OAI nrUE adds the fine-grained measurement and actuation path needed to
-implement power control. The implementation has been verified and measured
-on real radios, USRP X310 and B210 deployments on the ARA wireless living lab.
+the OAI nrUE adds the fine-grained measurement and actuation path needed for power
+control. The implementation has been verified and measured on real radios, USRP X310
+and B210 deployments on the ARA wireless living lab.
 
-**Tags:** Software
-
-For guidance on what to include in Tutorials, How-To Guides, Explanation, and Reference, see [Diátaxis](https://diataxis.fr/).
+**Tags:** CI4AI, Software
 
 ### License
 
@@ -26,14 +22,13 @@ obtained from the respective upstreams.
 
 ## References
 
-- Zhibo Meng and Hongwei Zhang, "Joint Scheduling and Power Control for Predictable
-  Per-Packet Reliability in URLLC". The PktR approach this work implements.
+1. PktR: Zhibo Meng, Hongwei Zhang, Joint Scheduling and Power Control for Predictable Per-Packet Reliability in URLLC, IEEE International Conference on Network Protocols (ICNP), 2024
+2. LDP: Zhibo Meng, Hongwei Zhang, Multi-Cell, Multi-Channel URLLC with Probabilistic Per-Packet Real-Time Guarantee, Technical Report ISU-DNC-TR-2020-01, Iowa State University, 2020
 - [OCUDU](https://github.com/ocudu), the 5G O-DU/CU stack the gNB patch series applies to.
 - [OpenAirInterface 5G RAN](https://gitlab.eurecom.fr/oai/openairinterface5g), the nrUE
   the UE patch series applies to.
 - [ARA Wireless Living Lab](https://arawireless.org), the testbed the implementation was
   validated on.
-- Release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Acknowledgements
 
@@ -78,8 +73,8 @@ git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git
 cd openairinterface5g/cmake_targets && ./build_oai -w USRP --nrUE --ninja
 ```
 
-The full walkthrough, including the host environment, container SDR access, every
-configuration knob, the manual launch command, and multi-cell bring-up, is in
+The full walkthrough, including the host environment,
+configuration, and multi-cell bring-up, is in
 [docs/BUILD_RUN.md](docs/BUILD_RUN.md).
 
 ## Run
@@ -97,13 +92,6 @@ The agent HTTP API, the live control-file overlay, the telemetry JSON, and the d
 are documented in [docs/AGENT_API.md](docs/AGENT_API.md).
 
 ---
-
-# Explanation
-
-The goal is easy to state. Hold `Pr{SINR >= gamma} >= beta` for every packet on every
-link, using only mechanisms a real network can deploy. That means standard TPC commands,
-HARQ feedback, RRC measurement reports, and Xn signaling between gNBs. Where standard
-feedback is too coarse, an optional modified UE closes the gap.
 
 ## What is in this release
 
@@ -129,7 +117,6 @@ docs/                architecture, build and run guide, agent API
 ```
 
 How KaiAir is organized, where every piece lives in the OCUDU tree, and what changed in
-the OAI nrUE is covered in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Component
-metadata for the ICICLE catalog is in [component-info.yaml](component-info.yaml).
+the OAI nrUE is covered in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). 
 
 ---
