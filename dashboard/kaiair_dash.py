@@ -8,7 +8,7 @@
 # Everything (telemetry polling AND control) goes through the agent API via ssh+curl, so no
 # extra ports or tunnels are needed.
 #
-#   telemetry : GET  /metrics            (1 Hz poll -> rolling 10 min buffer)
+#   telemetry : GET  /metrics            (poll -> rolling 10 min buffer)
 #   state     : GET  /kaiair/state      (toggle states shown in the UI)
 #   power     : POST /kaiair/power      {"enable": bool}     (instant, live overlay)
 #   target    : POST /kaiair/params     {"sinr_target_db": x} (instant, live overlay)

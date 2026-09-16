@@ -7,10 +7,6 @@
 #   control : GUI -> POST /kaiair/*  -> writes a JSON control file the gNB re-reads
 #   telemetry: gNB -> writes metrics JSON  -> agent serves it at GET /metrics
 #
-# Today (skeleton): start/stop + health + control-file writes + metrics passthrough are REAL.
-# The control-file toggles take effect at the NEXT gNB start (env is applied at launch);
-# making them live-without-restart is the gNB "runtime-toggle" change (step 2). Telemetry is
-# served from the metrics file once the gNB emits it (step 3); until then /metrics is a stub.
 #
 # Run:  python3 kaiair_agent.py --role gnb   [--config agent.gnb.json] [--port 5000]
 #       python3 kaiair_agent.py --role ue    [--config agent.ue.json]

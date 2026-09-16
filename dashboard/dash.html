@@ -189,7 +189,7 @@ function draw() {
     $("sat").textContent = `P(SINR≥γ) = ${(100 * sat).toFixed(0)}% (β target 90%)`;
   } else { $("sat").textContent = ""; }
   chart("ch-rsrp", "ul_rsrp_dbfs", "--s-rsrp");
-  // DL SINR: prefer the the dissertation's TRUE UE-reported SINR when the feedback chain is live; fall back to
+  // DL SINR: prefer the true UE-reported SINR when the feedback chain is live; fall back to
   // the parked CQI-derived estimate. Red line = the DL gamma target (per-direction, own slider).
   const hasTrueDl = DATA.history.some(h => h.dl_sinr_true_db != null);
   const dlKey = hasTrueDl ? "dl_sinr_true_db" : "dl_sinr_est_db";

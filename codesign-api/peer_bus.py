@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# KaiAir / PktR, inter-gNB peer bus ("PktR-Signal", pktR §V; plan step B2).
+# KaiAir / PktR, inter-gNB peer bus ("PktR-Signal", pktR Section V).
 #
 # Each gNB agent periodically broadcasts a compact JSON datagram with its cell's per-link PktR state
 # (K, TX power, PRB-occupancy beta, ER size, the serving RSRP its UEs see, and what its UEs hear
