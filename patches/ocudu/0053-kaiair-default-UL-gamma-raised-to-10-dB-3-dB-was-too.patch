@@ -1,7 +1,7 @@
-From 681b0a3a7d577a25343a57b9f80a6937c7bb7fb6 Mon Sep 17 00:00:00 2001
+From 040b04e0b816ddc173d59ecb2fbded51862cf189 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 14 Sep 2026 14:16:37 -0500
-Subject: [PATCH 53/53] kaiair: default UL gamma raised to 10 dB, 3 dB was too
+Subject: [PATCH 53/54] kaiair: default UL gamma raised to 10 dB, 3 dB was too
  small an operating point
 
 ---
@@ -23,7 +23,7 @@ index 3a175f5d95..3559140910 100644
    /// Cantelli cushion at the testbed's SINR jitter and pins the loop at max power.
    float beta = 0.9F;
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index 52da56db2a..52bc03a716 100644
+index b77a870afa..58037980ee 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -184,7 +184,7 @@ inline const char* ctrl_file_path()

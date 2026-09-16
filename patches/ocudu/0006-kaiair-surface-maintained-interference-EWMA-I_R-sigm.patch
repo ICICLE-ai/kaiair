@@ -1,7 +1,7 @@
-From 09f1c8b4e1f21c918e7d8f30bb66ba5e0db14ea7 Mon Sep 17 00:00:00 2001
+From 8586596e8b38e466799c7a15bb5695309001d4d7 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 24 Jun 2026 11:57:11 -0500
-Subject: [PATCH 06/53] kaiair: surface maintained interference EWMA (I_R,
+Subject: [PATCH 06/54] kaiair: surface maintained interference EWMA (I_R,
  sigma) into metrics + view
 
 The scheduler metrics handler now keeps a persistent per-UE pktr_link_state (across report

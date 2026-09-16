@@ -1,7 +1,7 @@
-From 2d11d7c06491ed5274d98ed0a5cde5944eaa6755 Mon Sep 17 00:00:00 2001
+From 6f4323580c6946286e8806ec7782ac79f8eb1dd3 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 30 Jun 2026 18:17:04 -0500
-Subject: [PATCH 03/12] kaiair: UL closed-loop power control, apply TPC at the
+Subject: [PATCH 03/13] kaiair: UL closed-loop power control, apply TPC at the
  nrUE PHY (fix #830)
 
 Stock OAI nrUE decodes the DCI TPC but never applies it (open-loop PUSCH),

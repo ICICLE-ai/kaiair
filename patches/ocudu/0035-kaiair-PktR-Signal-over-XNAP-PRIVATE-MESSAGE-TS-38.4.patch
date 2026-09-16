@@ -1,7 +1,7 @@
-From 4f52eaf440b70a795107b3de0af4549bcec8ed8e Mon Sep 17 00:00:00 2001
+From 1802b7dff77a5c193e917030789c4929ed48c7c4 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Thu, 20 Aug 2026 17:53:55 -0500
-Subject: [PATCH 35/53] kaiair: PktR-Signal over XNAP PRIVATE MESSAGE (TS
+Subject: [PATCH 35/54] kaiair: PktR-Signal over XNAP PRIVATE MESSAGE (TS
  38.423), private IE container, 500 ms sender/receiver in xnap_impl, store
  ingest, round-trip test
 
@@ -22,7 +22,7 @@ Subject: [PATCH 35/53] kaiair: PktR-Signal over XNAP PRIVATE MESSAGE (TS
 
 diff --git a/include/ocudu/asn1/xnap/kaiair_private_ies.h b/include/ocudu/asn1/xnap/kaiair_private_ies.h
 new file mode 100644
-index 0000000000..63956b5ee9
+index 0000000000..7fc6127524
 --- /dev/null
 +++ b/include/ocudu/asn1/xnap/kaiair_private_ies.h
 @@ -0,0 +1,72 @@
@@ -37,7 +37,7 @@ index 0000000000..63956b5ee9
 +//   PrivateIE-Container ::= SEQUENCE (SIZE(1..65535)) OF PrivateIE-Field
 +//   PrivateIE-Field     ::= { id PrivateIE-ID (local INTEGER 0..65535), criticality, value OPEN TYPE }
 +// with ONE private IE: id local = KAIAIR_PKTR_SIGNAL_IE_ID, value = OCTET STRING carrying the
-+// PktR-Signal record (per-link K, TX power, beta, ER, receiver-side RSRPs, pktR_CR §V).
++// PktR-Signal record (per-link K, TX power, beta, ER, receiver-side RSRPs, the PktR paper §V).
 +// Encoding follows the generator's own idioms exactly (private_ie_id_c / crit_e packers, open-type
 +// length guard, unbounded_octstring), so peers running this build interoperate and any standard
 +// XNAP decoder parses the envelope (and skips the private IE it does not know).
@@ -114,7 +114,7 @@ index 9ed778a943..e897e28e8c 100644
  // PrivateMessage ::= SEQUENCE
  struct private_msg_s {
 diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
-index 260d0a3b6d..415498af91 100644
+index 1bbff4d07f..dd2b8d5749 100644
 --- a/include/ocudu/kaiair/pktr_neighbor_store.h
 +++ b/include/ocudu/kaiair/pktr_neighbor_store.h
 @@ -124,24 +124,76 @@ public:

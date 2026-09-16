@@ -1,7 +1,7 @@
-From 6d5e5380f2af969697fedd93c62f2f190d66b550 Mon Sep 17 00:00:00 2001
+From 4ac5da954f10b13162f69fa83083a304a153a1f5 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sun, 26 Jul 2026 12:34:24 -0500
-Subject: [PATCH 20/53] kaiair: live overlay sinr_target_db now REPLACES the
+Subject: [PATCH 20/54] kaiair: live overlay sinr_target_db now REPLACES the
  stock PUSCH target in the TPC loop
 
 Previously the ctrl-file/GUI sinr_target only moved gamma (view + E_max) while the

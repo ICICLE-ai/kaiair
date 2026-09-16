@@ -1,7 +1,7 @@
-From a1e8c7345fc82988dedecff20992158f3be324e9 Mon Sep 17 00:00:00 2001
+From b9dcf808f8aa346c83d904ae8fa9e0dbeb8795eb Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 16:10:24 -0500
-Subject: [PATCH 42/53] kaiair: store measurement reports even without serving
+Subject: [PATCH 42/54] kaiair: store measurement reports even without serving
  RSRP; rate-limited map log; store counters in JSON
 
 ---
@@ -24,7 +24,7 @@ index d12fca1d17..a2754ea6bd 100644
                     s.ssb_pwr_dbm,
                     er.mode == kaiair::er_gate_mode::enforce ? "enforce"
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index 56e097d766..80ccaaf778 100644
+index 753d2d2f09..e16848172e 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -3,6 +3,7 @@

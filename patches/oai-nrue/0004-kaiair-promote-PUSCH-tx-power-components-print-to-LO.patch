@@ -1,7 +1,7 @@
-From 2851c27c202be3c8ef08169898c44d7d8da3777e Mon Sep 17 00:00:00 2001
+From 190249d7505b75e019c6357f69222c9d99ee89da Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 28 Jul 2026 13:22:22 -0500
-Subject: [PATCH 04/12] kaiair: promote PUSCH tx power components print to
+Subject: [PATCH 04/13] kaiair: promote PUSCH tx power components print to
  LOG_I (bench diagnostic)
 
 Makes P_O_PUSCH / alpha*PL / f_b_f_c visible at default log level; this is

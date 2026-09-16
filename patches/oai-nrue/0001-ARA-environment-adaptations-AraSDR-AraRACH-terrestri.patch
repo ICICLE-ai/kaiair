@@ -1,7 +1,7 @@
-From b7eb28aa8dda01f2d82507b224499ba8822b4530 Mon Sep 17 00:00:00 2001
+From a9d66003dfbefa95f944c10b85cd60e641e6106f Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 22 Jun 2026 12:45:34 -0500
-Subject: [PATCH 01/12] ARA environment adaptations: AraSDR/AraRACH
+Subject: [PATCH 01/13] ARA environment adaptations: AraSDR/AraRACH
  terrestrial/UE support
 
 Faithful capture of the uncommitted working-tree changes on the ARA UE

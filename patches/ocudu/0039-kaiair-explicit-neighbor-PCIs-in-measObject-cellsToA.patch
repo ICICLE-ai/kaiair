@@ -1,7 +1,7 @@
-From ff66c68f472a1c039a125b303f9b5e9d1ac0e0d6 Mon Sep 17 00:00:00 2001
+From 9bd57f4f6f2ceef5842f6d6641ab6b3c1d53914b Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 14:30:13 -0500
-Subject: [PATCH 39/53] kaiair: explicit neighbor PCIs in measObject
+Subject: [PATCH 39/54] kaiair: explicit neighbor PCIs in measObject
  cellsToAddModList for regular meas configs (OAI nrUE needs them)
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 39/53] kaiair: explicit neighbor PCIs in measObject
  1 file changed, 11 insertions(+)
 
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index 536150fd24..a5066905fa 100644
+index 5e4e10eb26..2cbed62b64 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -107,6 +107,17 @@ cell_meas_manager::get_measurement_config(cu_cp_ue_index_t                   ue_

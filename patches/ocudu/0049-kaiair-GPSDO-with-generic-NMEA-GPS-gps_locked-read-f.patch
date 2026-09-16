@@ -1,7 +1,7 @@
-From bcab86921b841be58b0a3ca6be48d9fd2a757a1d Mon Sep 17 00:00:00 2001
+From ab0b87952c2b9c02777e154889876be466c5f434 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Fri, 28 Aug 2026 21:51:10 -0500
-Subject: [PATCH 49/53] kaiair: GPSDO with generic-NMEA GPS, gps_locked read
+Subject: [PATCH 49/54] kaiair: GPSDO with generic-NMEA GPS, gps_locked read
  failure is non-fatal (ref_locked is the real gate); KAIAIR_REQUIRE_GPS_LOCK
  restores strict mode
 

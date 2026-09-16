@@ -1,7 +1,7 @@
-From dca2d5fdc0ba084d6bd3aaed44c569b1d66d924a Mon Sep 17 00:00:00 2001
+From dcd4d3bf751d001b4f5717377d35be97f317aee3 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 15:09:22 -0500
-Subject: [PATCH 41/53] kaiair: cellsToAddModList lists only the serving cell's
+Subject: [PATCH 41/54] kaiair: cellsToAddModList lists only the serving cell's
  configured ncells
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 41/53] kaiair: cellsToAddModList lists only the serving cell's
  1 file changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index a5066905fa..56e097d766 100644
+index 2cbed62b64..753d2d2f09 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -3,6 +3,7 @@

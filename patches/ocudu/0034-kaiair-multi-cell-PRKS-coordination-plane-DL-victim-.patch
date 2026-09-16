@@ -1,7 +1,7 @@
-From 015e29dbd180308d28421cc2f912a672fab2843e Mon Sep 17 00:00:00 2001
+From fde39cc4ebb9a84e5d403352db583f5b8b39109b Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Thu, 20 Aug 2026 16:04:41 -0500
-Subject: [PATCH 34/53] kaiair: multi-cell PRKS coordination plane, DL-victim
+Subject: [PATCH 34/54] kaiair: multi-cell PRKS coordination plane, DL-victim
  half (COMPILE-PENDING: no toolchain offline)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -10,7 +10,7 @@ Content-Transfer-Encoding: 8bit
 Plan steps B1-B5 of COMPLETE_IMPLEMENTATION_PLAN.md, written offline 2026-08-20:
 - include/ocudu/kaiair/pktr_neighbor_store.h: process-wide signal-map feed, CU-CP
   publishes each UE's serving+neighbor SSB-RSRP (38.133 idx-156 dBm) keyed by C-RNTI
-  (dissertation §4.5.5: the UE only measures, K is computed gNB-side); peer cells'
+  (the UE only measures, K is computed gNB-side); peer cells'
   per-link state (K, TX pwr, beta, ER, signal, rx-power-from-us) ingested from the
   agent's peer-bus snapshot file at ~2 Hz
 - lib/cu_cp/cell_meas_manager_impl.cpp: MeasurementReport hook -> store
@@ -152,7 +152,7 @@ index 7b095b5895..2b49cf874d 100644
                           "K={:+.1f} dB, residual I={:.1f} dBFS   (observe-only, not enforced)\n",
 diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
 new file mode 100644
-index 0000000000..260d0a3b6d
+index 0000000000..1bbff4d07f
 --- /dev/null
 +++ b/include/ocudu/kaiair/pktr_neighbor_store.h
 @@ -0,0 +1,291 @@
@@ -163,8 +163,8 @@ index 0000000000..260d0a3b6d
 +// step B1/B2). Two producers, one consumer set:
 +//
 +//   producer 1 (CU-CP, cell_meas_manager): every RRC MeasurementReport of a UE publishes the
-+//     serving-cell and neighbor-cell SSB-RSRP (dBm) keyed by the UE's C-RNTI, the dissertation's
-+//     §4.5.5 "signal map updated from intra-frequency measurement reports (38.133)". The UE never
++//     serving-cell and neighbor-cell SSB-RSRP (dBm) keyed by the UE's C-RNTI, the signal-map
++//     "signal map updated from intra-frequency measurement reports (38.133)". The UE never
 +//     computes K; it only measures.
 +//   producer 2 (the co-design agent's peer bus): neighbor gNBs' per-cell info (SSB power) and
 +//     per-link state (K, TX power, PRB occupancy beta, ER size) exchanged over UDP, PktR's
@@ -448,7 +448,7 @@ index 0000000000..260d0a3b6d
 +} // namespace kaiair
 +} // namespace ocudu
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index 9b0ec6bff1..536150fd24 100644
+index 9b0ec6bff1..5e4e10eb26 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -3,6 +3,7 @@
@@ -463,8 +463,8 @@ index 9b0ec6bff1..536150fd24 100644
  
    auto& meas_ctxt = ue_meas_context.meas_id_to_meas_context.at(meas_results.meas_id);
  
-+  // KaiAir/PktR: publish this report into the process-wide neighbor store, the dissertation's
-+  // §4.5.5 signal map ("updated from intra-frequency measurement reports, 38.133"). Keyed by the
++  // KaiAir/PktR: publish this report into the process-wide neighbor store, the signal-map feed
++  // (updated from intra-frequency measurement reports, 38.133). Keyed by the
 +  // UE's C-RNTI (the identity the DU scheduler shares with us); SS-RSRP index -> dBm (idx - 156).
 +  // The UE only measures; K is computed gNB-side from these values.
 +  if (const cu_cp_ue* kaiair_ue = ue_mng.find_ue(ue_index); kaiair_ue != nullptr) {
@@ -875,7 +875,7 @@ index 0000000000..346931e589
 +} // namespace kaiair
 +} // namespace ocudu
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index bf2119ba97..faadb89472 100644
+index 1595ca1f3b..5c5e7a5196 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -97,6 +97,10 @@ struct pktr_settings {

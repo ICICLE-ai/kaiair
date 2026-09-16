@@ -1,7 +1,7 @@
-From f6820689ff9f69bf2e61349ca78b306629e9bee7 Mon Sep 17 00:00:00 2001
+From 73efd99468f09f45325240b458206a9b93724505 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sun, 26 Jul 2026 12:13:07 -0500
-Subject: [PATCH 18/53] kaiair: LDP core, deadline -> retransmission budget ->
+Subject: [PATCH 18/54] kaiair: LDP core, deadline -> retransmission budget ->
  per-tx reliability (T-LDP.1)
 
 pktr_ldp.h: pure-math LDP composition. N(D) in-deadline transmission opportunities

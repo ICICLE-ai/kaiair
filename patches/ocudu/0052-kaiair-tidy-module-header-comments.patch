@@ -1,7 +1,7 @@
-From 841af17ff7f3331622358bfd11c28d6362d200d0 Mon Sep 17 00:00:00 2001
+From 9988977fe19354faf832dab9be16442ebd2ff220 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 14 Sep 2026 09:41:15 -0500
-Subject: [PATCH 52/53] kaiair: tidy module header comments
+Subject: [PATCH 52/54] kaiair: tidy module header comments
 
 ---
  include/ocudu/kaiair/pktr_neighbor_store.h    | 23 ++++-------
@@ -14,7 +14,7 @@ Subject: [PATCH 52/53] kaiair: tidy module header comments
  7 files changed, 57 insertions(+), 121 deletions(-)
 
 diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
-index 1ae1a3097b..6ede6332c2 100644
+index 0a16192f19..6ede6332c2 100644
 --- a/include/ocudu/kaiair/pktr_neighbor_store.h
 +++ b/include/ocudu/kaiair/pktr_neighbor_store.h
 @@ -1,23 +1,14 @@
@@ -26,8 +26,8 @@ index 1ae1a3097b..6ede6332c2 100644
 +// KaiAir/PktR neighbor store, the multi-cell signal-map feed.
  //
 -//   producer 1 (CU-CP, cell_meas_manager): every RRC MeasurementReport of a UE publishes the
--//     serving-cell and neighbor-cell SSB-RSRP (dBm) keyed by the UE's C-RNTI, the dissertation's
--//     §4.5.5 "signal map updated from intra-frequency measurement reports (38.133)". The UE never
+-//     serving-cell and neighbor-cell SSB-RSRP (dBm) keyed by the UE's C-RNTI, the signal-map
+-//     "signal map updated from intra-frequency measurement reports (38.133)". The UE never
 -//     computes K; it only measures.
 -//   producer 2 (the co-design agent's peer bus): neighbor gNBs' per-cell info (SSB power) and
 -//     per-link state (K, TX power, PRB occupancy beta, ER size) exchanged over UDP, PktR's
@@ -172,7 +172,7 @@ index d23c36e25c..9d45aad0aa 100644
  #pragma once
  
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index 9411eca1b6..52da56db2a 100644
+index 0a8f891294..b77a870afa 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -1,20 +1,12 @@

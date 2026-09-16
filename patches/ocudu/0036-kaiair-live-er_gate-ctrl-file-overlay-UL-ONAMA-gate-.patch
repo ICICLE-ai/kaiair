@@ -1,7 +1,7 @@
-From 81956dfdc500f7277ebb8dd720e06f640186150e Mon Sep 17 00:00:00 2001
+From f596f56f51919c0d2ecdff2888c094521a9cf799 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Thu, 20 Aug 2026 19:01:08 -0500
-Subject: [PATCH 36/53] kaiair: live er_gate ctrl-file overlay, UL ONAMA gate
+Subject: [PATCH 36/54] kaiair: live er_gate ctrl-file overlay, UL ONAMA gate
  in can_allocate_pusch
 
 ---
@@ -33,7 +33,7 @@ index 37ee0b1614..32262f1715 100644
    pktr_conflict_graph graph;
    const float         gamma_dl = pktr_dl_gamma_now(s.dl_gamma_db);
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index faadb89472..9411eca1b6 100644
+index 5c5e7a5196..0a8f891294 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -199,6 +199,10 @@ struct live_controls_t {

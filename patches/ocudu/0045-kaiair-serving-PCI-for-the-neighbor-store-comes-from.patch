@@ -1,7 +1,7 @@
-From 5ee610e3497e34e6014c0cad47429f779c6b2681 Mon Sep 17 00:00:00 2001
+From ab8c2088e66490d74ef8ce960785c20f3ebd1297 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 16:27:53 -0500
-Subject: [PATCH 45/53] kaiair: serving PCI for the neighbor store comes from
+Subject: [PATCH 45/54] kaiair: serving PCI for the neighbor store comes from
  the UE context, not the (neighbor-keyed) meas context
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 45/53] kaiair: serving PCI for the neighbor store comes from
  1 file changed, 4 insertions(+), 2 deletions(-)
 
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index 0819fb5a95..df62cff786 100644
+index ba3610323c..7a08a5be8d 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -361,8 +361,10 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_

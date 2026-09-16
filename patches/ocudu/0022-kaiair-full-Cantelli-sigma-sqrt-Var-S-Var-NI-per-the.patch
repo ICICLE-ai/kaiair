@@ -1,8 +1,9 @@
-From 27098ce374220832d6b3a76ac60548c4e3a88c05 Mon Sep 17 00:00:00 2001
+From 26078e298ace5371a7902e2da6e3b21ea37a7f65 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 28 Jul 2026 19:16:47 -0500
-Subject: [PATCH 22/53] kaiair: full Cantelli sigma sqrt(Var[S]+Var[NI]) per
- pktR_CR Eq.(2)/ch.4; LDP-composed DL BLER target; ul_sinr_target_db telemetry
+Subject: [PATCH 22/54] kaiair: full Cantelli sigma sqrt(Var[S]+Var[NI]) per
+ the PktR paper Eq. (2); LDP-composed DL BLER target; ul_sinr_target_db
+ telemetry
 
 - pktr_link_state now tracks signal-side EWMA mean/var alongside NI; sigma_sinr_db()
   is the std of (S-I) the papers require - the cushion and E_max were using std(NI) only.
@@ -97,7 +98,7 @@ index 27ca4842ac..da51f55b76 100644
                       "(headroom {:.1f} dB above current I_R)\n",
                       ue.pusch_rsrp_db,
 diff --git a/include/ocudu/scheduler/scheduler_metrics.h b/include/ocudu/scheduler/scheduler_metrics.h
-index 399a14669a..85d928cf16 100644
+index 399a14669a..a331f4c63a 100644
 --- a/include/ocudu/scheduler/scheduler_metrics.h
 +++ b/include/ocudu/scheduler/scheduler_metrics.h
 @@ -49,6 +49,9 @@ struct scheduler_ue_metrics {
@@ -105,7 +106,7 @@ index 399a14669a..85d928cf16 100644
    /// KaiAir/PktR: EWMA standard deviation of NI (dB), the interference part of the Cantelli sigma.
    float pktr_std_ni_db = 0.0F;
 +  /// KaiAir/PktR: full Cantelli sigma sqrt(Var[S] + Var[NI]) (dB), the std of (S - I) that the
-+  /// reliability cushion sigma*k(beta) uses (pktR_CR Eq. (2), thesis ch.4 Eq. (4.45)).
++  /// reliability cushion sigma*k(beta) uses (PktR paper Eq. (2)).
 +  float pktr_sigma_db = 0.0F;
    /// SNR in dB estimated for the PUCCH.
    float pucch_snr_db;
@@ -126,7 +127,7 @@ index 6076a45374..834a071821 100644
      offset_db_(std::clamp(s.dl_nominal_db, 0.0F, 15.0F))
    {
 diff --git a/lib/scheduler/kaiair/pktr_link_state.h b/lib/scheduler/kaiair/pktr_link_state.h
-index 53c4bb4b7c..cf09355ee2 100644
+index 53c4bb4b7c..9c61aae412 100644
 --- a/lib/scheduler/kaiair/pktr_link_state.h
 +++ b/lib/scheduler/kaiair/pktr_link_state.h
 @@ -16,9 +16,16 @@
@@ -137,12 +138,12 @@ index 53c4bb4b7c..cf09355ee2 100644
 -// G-hat and Var[G]) and the beta-quantile of SINR are added in later increments; this class
 -// currently tracks the interference side only.
 +// The same EWMA is kept for the received signal power S (RSRP), so the full Cantelli sigma of the
-+// PktR power-control law (pktR_CR Eq. (2), thesis ch.4 Eq. (4.45)) is available:
++// PktR power-control law (PktR paper Eq. (2)) is available:
 +//
 +//   sigma_SINR = sqrt(Var[S] + Var[NI])
 +//
 +// Var[S] proxies the channel-gain variance Var[G] under quasi-static transmit power (the TPC
-+// accumulator moves in sub-dB steps at steady state). The ch.4 refinement, slow/fast channel
++// accumulator moves in sub-dB steps at steady state). A slow/fast channel
 +// decomposition with a Kalman predictor for G-hat, is a later increment.
 +//
 +// Scope: one instance per link (per UE, per direction).
@@ -192,8 +193,8 @@ index 53c4bb4b7c..cf09355ee2 100644
 +  float std_signal_db() const { return std::sqrt(var_sig_ > 0.0F ? var_sig_ : 0.0F); }
 +
 +  /// Full Cantelli sigma of the PktR power-control law: sigma = sqrt(Var[S] + Var[NI]) (dB).
-+  /// This is the std of (S - I) from pktR_CR Eq. (2) under the ch.4 independence decomposition
-+  /// (Eq. 4.45), and the value the reliability cushion sigma*k(beta) must use.
++  /// This is the std of (S - I) from the PktR paper Eq. (2) under the independence decomposition
++  /// and the value the reliability cushion sigma*k(beta) must use.
 +  float sigma_sinr_db() const
 +  {
 +    const float v = (var_sig_ > 0.0F ? var_sig_ : 0.0F) + (var_ni_ > 0.0F ? var_ni_ : 0.0F);
@@ -221,7 +222,7 @@ index 53c4bb4b7c..cf09355ee2 100644
  };
  
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index 75239c709d..059529c57a 100644
+index 75239c709d..0bcd05af7f 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -279,12 +279,14 @@ inline float pktr_gamma_now(float env_fallback)
@@ -232,8 +233,8 @@ index 75239c709d..059529c57a 100644
 +  if (not pktr_actuate_now(s.actuate) or not ls.has_samples() or ls.sigma_sinr_db() > s.sigma_transient_db) {
      return 0.0F;
    }
-+  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per pktR_CR Eq. (2) / thesis
-+  // ch.4 Eq. (4.46), NOT the interference std alone.
++  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per the PktR paper Eq. (2),
++  // NOT the interference std alone.
    // LDP composition: with a deadline configured, the cushion targets the per-transmission
    // reliability p_req(N(D)) needed to deliver the PACKET by its deadline via HARQ retries.
 -  return ls.std_ni_db() * cantelli_sigma_factor(ldp_effective_tx_beta(s.ldp, s.ipc.beta));
@@ -288,7 +289,7 @@ index b5ad988cfd..1491edf712 100644
  TEST(pktr_dl_power_controller_test, starts_at_nominal)
  {
 diff --git a/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp b/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp
-index 9a49a260d5..7da4d5a3db 100644
+index 9a49a260d5..1fce34797b 100644
 --- a/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp
 +++ b/tests/unittests/scheduler/kaiair/pktr_link_state_test.cpp
 @@ -103,3 +103,45 @@ TEST(pktr_link_state_test, reset_clears_state)
@@ -307,7 +308,7 @@ index 9a49a260d5..7da4d5a3db 100644
 +  EXPECT_FLOAT_EQ(ls.sigma_sinr_db(), 0.0F);
 +}
 +
-+// Paper anchor (pktR_CR Eq. (2) via ch.4 Eq. (4.45)): sigma is the std of (S - I), i.e.
++// Paper anchor (PktR paper Eq. (2)): sigma is the std of (S - I), i.e.
 +// sqrt(Var[S] + Var[NI]), a fluctuating SIGNAL with constant NI must inflate the cushion sigma
 +// even though the NI std alone stays ~0.
 +TEST(pktr_link_state_test, sigma_includes_signal_variance)

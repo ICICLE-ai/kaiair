@@ -1,14 +1,14 @@
-From cc9ee350856875618658f4cce82f17c6476aed72 Mon Sep 17 00:00:00 2001
+From 653a3782b10f79419bbfdd32db96da09d9e5e23b Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 16:18:53 -0500
-Subject: [PATCH 44/53] kaiair: map log via pre-formatted string
+Subject: [PATCH 44/54] kaiair: map log via pre-formatted string
 
 ---
  .../cell_meas_manager/cell_meas_manager_impl.cpp  | 15 ++++++++-------
  1 file changed, 8 insertions(+), 7 deletions(-)
 
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index 823269c530..0819fb5a95 100644
+index d409355fe2..ba3610323c 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -378,13 +378,14 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_

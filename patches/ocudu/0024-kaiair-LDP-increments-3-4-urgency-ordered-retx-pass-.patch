@@ -1,7 +1,7 @@
-From b77470e5b12b27011c846fbbaa10d54b10a981a1 Mon Sep 17 00:00:00 2001
+From 6e7a507fa2decf287dca1bf92ccd009a6e1c7273 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Thu, 30 Jul 2026 15:34:55 -0500
-Subject: [PATCH 24/53] kaiair: LDP increments 3+4 - urgency-ordered retx pass
+Subject: [PATCH 24/54] kaiair: LDP increments 3+4 - urgency-ordered retx pass
  + N(D)-capped retxs for data TBs (SRB exempt)
 
 - Increment 3: with a deadline active, both intra-slice retx loops serve pending retxs

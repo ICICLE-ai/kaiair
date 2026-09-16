@@ -1,7 +1,7 @@
-From 68c95afbfe67dbdf3a0ee78446d3f3373aaee4d6 Mon Sep 17 00:00:00 2001
+From 0407604753ea7a7f226beb57facce9dc0cb490bb Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 12:24:39 -0500
-Subject: [PATCH 07/12] kaiair: ch.4 true-SINR DL feedback (UE half)
+Subject: [PATCH 07/13] kaiair: true-SINR DL feedback (UE half)
 
 - nr_pdsch_data_rssi (Eq. 4.52/4.53) + nr_measure_interference (Eq. 4.54/4.55)
   in nr_dlsch_demodulation.c: slot-level PDSCH-data RSSI (data REs only) and
@@ -24,7 +24,7 @@ Subject: [PATCH 07/12] kaiair: ch.4 true-SINR DL feedback (UE half)
  7 files changed, 192 insertions(+), 5 deletions(-)
 
 diff --git a/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h b/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
-index e47b8e3fcc..2d9991f24b 100644
+index e47b8e3fcc..860ccdce70 100644
 --- a/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
 +++ b/nfapi/open-nFAPI/nfapi/public_inc/fapi_nr_ue_interface.h
 @@ -55,12 +55,17 @@ typedef struct {
@@ -38,7 +38,7 @@ index e47b8e3fcc..2d9991f24b 100644
    uint8_t i2;
    uint8_t cqi;
    rlm_t radiolink_monitoring;
-+  /* KaiAir ch.4 true-SINR DL feedback: slot-level PDSCH data RSSI and unused-RB interference
++  /* KaiAir DL-SINR true-SINR DL feedback: slot-level PDSCH data RSSI and unused-RB interference
 +     measured in the PDSCH demodulator (relative digital dB). */
 +  float kaiair_pdsch_rssi_db;
 +  float kaiair_intf_db;
@@ -47,14 +47,14 @@ index e47b8e3fcc..2d9991f24b 100644
  
  typedef struct {
 diff --git a/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c b/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c
-index b15b5ce56c..fc5acefa48 100644
+index b15b5ce56c..c7fb2a161e 100644
 --- a/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c
 +++ b/openair1/PHY/NR_UE_TRANSPORT/csi_rx.c
 @@ -946,6 +946,12 @@ void nr_ue_csi_rs_procedures(PHY_VARS_NR_UE *ue,
    if (!ue->if_inst || !ue->if_inst->dl_indication)
      return;
  
-+  // KaiAir ch.4 true-SINR DL feedback: latest slot-level PDSCH RSSI / unused-RB interference from
++  // KaiAir DL-SINR true-SINR DL feedback: latest slot-level PDSCH RSSI / unused-RB interference from
 +  // the PDSCH demodulator (nr_dlsch_demodulation.c), piggy-backed on the CSI measurement indication
 +  // so the MAC-side custom CSI payload builder always has fresh values.
 +  extern volatile float kaiair_pdsch_rssi_db, kaiair_pdsch_intf_db;
@@ -67,14 +67,14 @@ index b15b5ce56c..fc5acefa48 100644
      .i2 = *i2,
      .cqi = cqi,
      .radiolink_monitoring = RLM_no_monitoring, // TODO do be activated in case of RLM based on CSI-RS
-+    .kaiair_pdsch_rssi_db = kaiair_pdsch_rssi_db, // KaiAir ch.4
-+    .kaiair_intf_db = kaiair_pdsch_intf_db,       // KaiAir ch.4
-+    .kaiair_meas_valid = (uint8_t)kaiair_pdsch_meas_valid, // KaiAir ch.4
++    .kaiair_pdsch_rssi_db = kaiair_pdsch_rssi_db, // KaiAir DL-SINR
++    .kaiair_intf_db = kaiair_pdsch_intf_db,       // KaiAir DL-SINR
++    .kaiair_meas_valid = (uint8_t)kaiair_pdsch_meas_valid, // KaiAir DL-SINR
    };
    nr_downlink_indication_t dl_indication;
    fapi_nr_rx_indication_t rx_ind = {0};
 diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
-index 9b94dd54aa..34296159ce 100644
+index 9b94dd54aa..4d9e67eb8b 100644
 --- a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
 +++ b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
 @@ -29,6 +29,66 @@
@@ -82,8 +82,8 @@ index 9b94dd54aa..34296159ce 100644
  #define print_shorts(s,x) printf("%s = [%d+j*%d, %d+j*%d, %d+j*%d, %d+j*%d]\n",s,(x)[0],(x)[1],(x)[2],(x)[3],(x)[4],(x)[5],(x)[6],(x)[7])
  
 +// ---------------------------------------------------------------------------------------------
-+// KaiAir ch.4 true-SINR DL feedback (thesis §4.5.1/§4.5.2): slot-level PDSCH data RSSI
-+// (Eq. 4.52/4.53) and unused-RB interference (Eq. 4.54/4.55), measured from the post-FFT
++// KaiAir DL-SINR true-SINR DL feedback: slot-level PDSCH data RSSI
++// and unused-RB interference, measured from the post-FFT
 +// frequency-domain samples Y_{k,s} during PDSCH demodulation. Single-UE process => one global
 +// accumulator; reset at the first PDSCH symbol of the slot, finalized at the last. The dB values
 +// are in the RELATIVE digital scale, only the difference RSSI - I (the DL SINR) is
@@ -97,12 +97,12 @@ index 9b94dd54aa..34296159ce 100644
 +
 +static kaiair_csi_meas_acc_t kaiair_csi_acc;
 +// Latest finalized slot-level measurements (telemetry-grade cross-thread access; the MAC-side
-+// CSI payload builder reads these, increment B of the ch.4 feedback chain).
++// CSI payload builder reads these).
 +volatile float kaiair_pdsch_rssi_db = 0.0f;
 +volatile float kaiair_pdsch_intf_db = 0.0f;
 +volatile int kaiair_pdsch_meas_valid = 0;
 +
-+// KaiAir ch.4 Eq. (4.52): accumulate |Y|^2 over the scheduled PDSCH data REs of this symbol.
++// KaiAir DL-SINR: accumulate |Y|^2 over the scheduled PDSCH data REs of this symbol.
 +// rxdataF_ext already holds ONLY data REs (DMRS/CSI-RS stripped by nr_dlsch_extract_rbs).
 +static void nr_pdsch_data_rssi(int nbRx, uint32_t rx_size_symbol, c16_t rxdataF_ext[][rx_size_symbol], uint32_t nb_re)
 +{
@@ -113,7 +113,7 @@ index 9b94dd54aa..34296159ce 100644
 +  }
 +}
 +
-+// KaiAir ch.4 Eq. (4.54): accumulate |Y|^2 over REs of RBs NOT used by the scheduled PDSCH in
++// KaiAir DL-SINR: accumulate |Y|^2 over REs of RBs NOT used by the scheduled PDSCH in
 +// this symbol (the interference + noise floor the UE observes). NOTE: bitmap indexing matches the
 +// scheduled-RB test used in the CSI-overlap counting above (bench BWPStart = 0).
 +static void nr_measure_interference(NR_DL_FRAME_PARMS *fp,
@@ -149,8 +149,8 @@ index 9b94dd54aa..34296159ce 100644
        scope_req->scope_rxdataF_offset += size;
      }
 +
-+    // KaiAir ch.4 true-SINR DL feedback: accumulate this symbol's PDSCH-data RSSI (Eq. 4.52) and
-+    // unused-RB interference (Eq. 4.54); finalize the slot-level averages (Eq. 4.53/4.55) at the
++    // KaiAir DL-SINR true-SINR DL feedback: accumulate this symbol's PDSCH-data RSSI and
++    // unused-RB interference; finalize the slot-level averages at the
 +    // last PDSCH symbol so the MAC CSI builder always sees a coherent (RSSI, I) pair.
 +    {
 +      if (first_symbol_flag)
@@ -183,14 +183,14 @@ index 9b94dd54aa..34296159ce 100644
      //--------------------- Channel Scaling --------------------
      //----------------------------------------------------------
 diff --git a/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c b/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c
-index 28ba6dddad..5ef5ea352c 100644
+index 28ba6dddad..0bbf6f10e7 100644
 --- a/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c
 +++ b/openair2/LAYER2/NR_MAC_COMMON/nr_mac_common.c
 @@ -4773,6 +4773,17 @@ void compute_csi_bitlen(const NR_CSI_MeasConfig_t *csi_MeasConfig, nr_csi_report
  
  uint16_t nr_get_csi_bitlen(nr_csi_report_t *csi_report)
  {
-+  // KaiAir ch.4 true-SINR DL feedback: the custom 10-bit payload (5-bit PDSCH RSSI + 5-bit
++  // KaiAir DL-SINR true-SINR DL feedback: the custom 10-bit payload (5-bit PDSCH RSSI + 5-bit
 +  // interference) replaces the standard CSI report, so every consumer of the part-1 bit length
 +  // (PUCCH PRB sizing, UCI assembly) must see 10. The gNB (ocudu) applies the same fixed size.
 +  static int kaiair_ch4 = -1;
@@ -205,14 +205,14 @@ index 28ba6dddad..5ef5ea352c 100644
    uint16_t max_bitlen = 0;
    L1_Meas_bitlen_t *CSI_report_bitlen = NULL;
 diff --git a/openair2/LAYER2/NR_MAC_UE/mac_defs.h b/openair2/LAYER2/NR_MAC_UE/mac_defs.h
-index d53f2905d0..ed34580da4 100644
+index d53f2905d0..52301ed108 100644
 --- a/openair2/LAYER2/NR_MAC_UE/mac_defs.h
 +++ b/openair2/LAYER2/NR_MAC_UE/mac_defs.h
 @@ -416,6 +416,10 @@ typedef struct {
    uint16_t i1;
    uint8_t i2;
    uint8_t cqi;
-+  /* KaiAir ch.4 true-SINR DL feedback: PDSCH-data RSSI + unused-RB interference (relative dB). */
++  /* KaiAir DL-SINR true-SINR DL feedback: PDSCH-data RSSI + unused-RB interference (relative dB). */
 +  float kaiair_pdsch_rssi_db;
 +  float kaiair_intf_db;
 +  uint8_t kaiair_meas_valid;
@@ -220,14 +220,14 @@ index d53f2905d0..ed34580da4 100644
  
  typedef enum ta_type {
 diff --git a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
-index 9afd64223c..953156574f 100644
+index 9afd64223c..b1aa6602de 100644
 --- a/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
 +++ b/openair2/LAYER2/NR_MAC_UE/nr_ue_procedures.c
 @@ -1571,6 +1571,10 @@ void nr_ue_process_l1_measurements(NR_UE_MAC_INST_t *mac, frame_t frame, int slo
      mac->csirs_measurements.i2 = l1_measurements->i2;
      mac->csirs_measurements.cqi = l1_measurements->cqi;
      mac->csirs_measurements.ri = l1_measurements->rank_indicator;
-+    // KaiAir ch.4 true-SINR DL feedback: PDSCH-data RSSI + unused-RB interference from the PHY.
++    // KaiAir DL-SINR true-SINR DL feedback: PDSCH-data RSSI + unused-RB interference from the PHY.
 +    mac->csirs_measurements.kaiair_pdsch_rssi_db = l1_measurements->kaiair_pdsch_rssi_db;
 +    mac->csirs_measurements.kaiair_intf_db = l1_measurements->kaiair_intf_db;
 +    mac->csirs_measurements.kaiair_meas_valid = l1_measurements->kaiair_meas_valid;
@@ -238,9 +238,9 @@ index 9afd64223c..953156574f 100644
    return csi;
  }
  
-+// KaiAir ch.4 true-SINR DL feedback (thesis §4.5.3): custom 10-bit CSI payload replacing the
++// KaiAir DL-SINR true-SINR DL feedback: custom 10-bit CSI payload replacing the
 +// standard report, 5-bit quantized PDSCH-data RSSI (bits 0-4) + 5-bit quantized interference
-+// (bits 5-9), LSB-first per Eq. (4.56), then bit-reversed so the intended fields survive the
++// (bits 5-9), LSB-first, then bit-reversed so the intended fields survive the
 +// PUCCH small-block encoding chain (§4.5.3.2). Quantization: q = round((dB - REF)/STEP) clamped
 +// to [0,31]; REF/STEP via KAIAIR_CH4_CSI_REF_DB / KAIAIR_CH4_CSI_STEP_DB (STEP must match the gNB).
 +static nfapi_nr_ue_csi_payload_t kaiair_get_ch4_csi_payload(NR_UE_MAC_INST_t *mac)
@@ -290,7 +290,7 @@ index 9afd64223c..953156574f 100644
    AssertFatal(csi_MeasConfig->csi_ReportConfigToAddModList->list.count > 0,"No CSI Report configuration available\n");
    nfapi_nr_ue_csi_payload_t csi = {0};
 +
-+  // KaiAir ch.4: replace the standard CSI payload with the custom 10-bit (RSSI, I) report.
++  // KaiAir DL-SINR: replace the standard CSI payload with the custom 10-bit (RSSI, I) report.
 +  static int kaiair_ch4 = -1;
 +  if (kaiair_ch4 < 0) {
 +    const char *e = getenv("KAIAIR_CH4_CSI");

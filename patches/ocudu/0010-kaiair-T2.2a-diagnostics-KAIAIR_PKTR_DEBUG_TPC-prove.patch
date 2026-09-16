@@ -1,7 +1,7 @@
-From 1d2e2086da83ec147ba8cd0a26a2f53e0cbd1c5a Mon Sep 17 00:00:00 2001
+From be53b6e1ce4d263d739f9a26ece8cae9ea443caa Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 27 Jun 2026 22:10:48 -0500
-Subject: [PATCH 10/53] kaiair: T2.2a diagnostics, KAIAIR_PKTR_DEBUG_TPC;
+Subject: [PATCH 10/54] kaiair: T2.2a diagnostics, KAIAIR_PKTR_DEBUG_TPC;
  proves UL loop is open at OAI UE
 
 Add rate-limited TPC-loop instrumentation to pusch_power_controller (gated by

@@ -1,0 +1,23 @@
+From 3d174666384c7b377fab8582a44abd7ee9501a50 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 15 Sep 2026 19:24:24 -0500
+Subject: [PATCH 13/13] comment cleanup, source citations point to public
+ papers only
+
+---
+ openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+index 1fb5c75595..818d3b0b1b 100644
+--- a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
++++ b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
+@@ -976,7 +976,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
+     }
+ 
+     // KaiAir DL true-SINR feedback (UE-reported): accumulate this symbol's PDSCH-data RSSI and
+-    // unused-RB interference; finalize the slot-level averages at the
++    // unused-RB interference, and finalize the slot-level averages at the
+     // last PDSCH symbol so the MAC CSI builder always sees a coherent (RSSI, I) pair.
+     // C-RNTI ONLY: SIB/paging PDSCH are broadcast at FULL power, while the gNB's per-UE DL power
+     // actuator sheds only the C-RNTI data PDSCH, mixing them in blinds the loop to its own

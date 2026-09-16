@@ -1,7 +1,7 @@
-From 312491363fa90b4d365d497007d159f6d3c7a02c Mon Sep 17 00:00:00 2001
+From 7fb38a8ad3ab66c76c2a37606ab6fc09053b3a32 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 22 Aug 2026 16:15:06 -0500
-Subject: [PATCH 43/53] kaiair: per-link neighbor-store picture fields in the
+Subject: [PATCH 43/54] kaiair: per-link neighbor-store picture fields in the
  metrics JSON (bring-up visibility)
 
 ---
@@ -37,7 +37,7 @@ index a2754ea6bd..186d1b51c0 100644
                       er_in[i].rnti,
                       r.live ? "true" : "false",
 diff --git a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
-index 80ccaaf778..823269c530 100644
+index e16848172e..d409355fe2 100644
 --- a/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 +++ b/lib/cu_cp/cell_meas_manager/cell_meas_manager_impl.cpp
 @@ -379,8 +379,8 @@ void cell_meas_manager::report_measurement(cu_cp_ue_index_t ue_index, const rrc_

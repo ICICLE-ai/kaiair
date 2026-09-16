@@ -1,50 +1,49 @@
-From c69040800bfbb9c37ca637a88871c202383df709 Mon Sep 17 00:00:00 2001
+From 28e4f2e8b95569934827c878d871fac1c7c29a0b Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 16:47:23 -0500
-Subject: [PATCH 27/53] kaiair: rename DL-feedback naming, drop 'ch4' tokens
- (env KAIAIR_DL_SINR_CSI*, [KaiAir DL-SINR] logs, dissertation-cited
- comments); UL LDP gate debug print
+Subject: [PATCH 27/54] kaiair: rename DL-feedback naming, drop 'ch4' tokens
+ (env KAIAIR_DL_SINR_CSI*, [KaiAir DL-SINR] logs, old-style comments); UL LDP
+ gate debug print
 
 ---
  .../consumers/kaiair_pktr_metrics_view.cpp    |  2 +-
- .../scheduler/scheduler_feedback_handler.h    |  4 +--
- include/ocudu/scheduler/scheduler_metrics.h   |  8 +++---
- lib/mac/mac_sched/uci_cell_decoder.cpp        | 26 +++++++++----------
- .../csi_report_on_pucch_helpers.cpp           | 12 ++++-----
- .../kaiair/pktr_dl_power_controller.h         |  8 +++---
- lib/scheduler/kaiair/pktr_link_state.h        |  6 ++---
- lib/scheduler/kaiair/pktr_runtime_config.h    | 26 +++++++++----------
- .../logging/scheduler_metrics_handler.cpp     |  4 +--
+ .../scheduler/scheduler_feedback_handler.h    |  4 ++--
+ include/ocudu/scheduler/scheduler_metrics.h   |  6 ++---
+ lib/mac/mac_sched/uci_cell_decoder.cpp        | 24 +++++++++----------
+ .../csi_report_on_pucch_helpers.cpp           | 12 +++++-----
+ .../kaiair/pktr_dl_power_controller.h         |  8 +++----
+ lib/scheduler/kaiair/pktr_runtime_config.h    | 24 +++++++++----------
+ .../logging/scheduler_metrics_handler.cpp     |  4 ++--
  .../logging/scheduler_metrics_handler.h       |  6 ++---
  .../uci_indication_selector.cpp               |  2 +-
  .../uci_scheduling/uci_indication_selector.h  |  2 +-
- lib/scheduler/ue_context/ue_cell.cpp          |  4 +--
+ lib/scheduler/ue_context/ue_cell.cpp          |  4 ++--
  lib/scheduler/ue_context/ue_cell.h            |  6 ++---
- .../ue_scheduling/ue_event_manager.cpp        | 16 +++++++++++-
- 15 files changed, 73 insertions(+), 59 deletions(-)
+ .../ue_scheduling/ue_event_manager.cpp        | 16 ++++++++++++-
+ 14 files changed, 67 insertions(+), 53 deletions(-)
 
 diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
-index 93112953aa..3d2a6ab1cd 100644
+index 9a728b21b0..3d2a6ab1cd 100644
 --- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
 +++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
 @@ -121,7 +121,7 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
      // CQI-derived estimate so the GUI can chart a DL quality figure alongside the UL SINR.
      // (Parked path, kept for the CQI-only vs true-SINR feedback comparison.)
      num("dl_sinr_est_db", has_cqi, cqi_to_sinr_db_estimate(ue.cqi_stats.get_mean()));
--    // KaiAir ch.4 true-SINR DL feedback: the UE-reported DL SINR (EWMA) and the DL loop's ACTUAL
+-    // KaiAir DL-SINR true-SINR DL feedback: the UE-reported DL SINR (EWMA) and the DL loop's ACTUAL
 +    // KaiAir/PktR DL true-SINR feedback (UE-reported): the UE-reported DL SINR (EWMA) and the DL loop's ACTUAL
      // live target (gamma_DL + sigma-compensated cushion), mirrored straight from the controller so
      // the GUI red line is the loop truth rather than a view-side recomputation.
      {
 diff --git a/include/ocudu/scheduler/scheduler_feedback_handler.h b/include/ocudu/scheduler/scheduler_feedback_handler.h
-index e2eb1c6b22..26de1366d6 100644
+index 345e78a36b..26de1366d6 100644
 --- a/include/ocudu/scheduler/scheduler_feedback_handler.h
 +++ b/include/ocudu/scheduler/scheduler_feedback_handler.h
 @@ -185,8 +185,8 @@ struct uci_indication {
        harq_ack_report_list harqs;
        /// CSI report.
        std::optional<csi_report_data> csi;
--      /// KaiAir ch.4 true-SINR DL feedback: UE-reported DL SINR (dB, relative digital scale)
+-      /// KaiAir DL-SINR true-SINR DL feedback: UE-reported DL SINR (dB, relative digital scale)
 -      /// decoded from the custom 10-bit CSI payload. Set only when KAIAIR_CH4_CSI is active.
 +      /// KaiAir/PktR DL true-SINR feedback (UE-reported): UE-reported DL SINR (dB, relative digital scale)
 +      /// decoded from the custom 10-bit CSI payload. Set only when KAIAIR_DL_SINR_CSI is active.
@@ -52,45 +51,36 @@ index e2eb1c6b22..26de1366d6 100644
        /// Metric of channel quality in dB.
        std::optional<float> ul_sinr_dB;
 diff --git a/include/ocudu/scheduler/scheduler_metrics.h b/include/ocudu/scheduler/scheduler_metrics.h
-index 0a624db0bd..5f46a3a251 100644
+index ad3be4bc96..8347ab7e40 100644
 --- a/include/ocudu/scheduler/scheduler_metrics.h
 +++ b/include/ocudu/scheduler/scheduler_metrics.h
-@@ -50,7 +50,7 @@ struct scheduler_ue_metrics {
-   /// KaiAir/PktR: EWMA standard deviation of NI (dB), the interference part of the Cantelli sigma.
-   float pktr_std_ni_db = 0.0F;
-   /// KaiAir/PktR: full Cantelli sigma sqrt(Var[S] + Var[NI]) (dB), the std of (S - I) that the
--  /// reliability cushion sigma*k(beta) uses (pktR_CR Eq. (2), thesis ch.4 Eq. (4.45)).
-+  /// reliability cushion sigma*k(beta) uses (pktR_CR Eq. (2), the PktR dissertation Eq. (4.45)).
-   float pktr_sigma_db = 0.0F;
-   /// KaiAir/PktR LDP: DL data-TB delivery outcomes this interval (LDP Definition 1 view).
-   /// A TB counts once at its FINAL HARQ outcome: on-time (delivered with first-tx age < deadline),
 @@ -66,14 +66,14 @@ struct scheduler_ue_metrics {
    unsigned pktr_ldp_ul_late   = 0;
    unsigned pktr_ldp_ul_failed = 0;
    unsigned pktr_ldp_ul_tx_sum = 0;
--  /// KaiAir ch.4 true-SINR DL feedback: number of UE-reported DL SINR samples so far, EWMA mean of
+-  /// KaiAir DL-SINR true-SINR DL feedback: number of UE-reported DL SINR samples so far, EWMA mean of
 +  /// KaiAir/PktR DL true-SINR feedback (UE-reported): number of UE-reported DL SINR samples so far, EWMA mean of
    /// the reported DL SINR (dB, relative scale) and its EWMA std (the DL Cantelli sigma input).
    uint64_t pktr_dl_sinr_samples = 0;
    float    pktr_dl_sinr_db      = 0.0F;
    float    pktr_dl_sigma_db     = 0.0F;
--  /// KaiAir ch.4: the DL loop's live SINR target (gamma_DL + cushion), the loop truth for the GUI.
+-  /// KaiAir DL-SINR: the DL loop's live SINR target (gamma_DL + cushion), the loop truth for the GUI.
 +  /// KaiAir/PktR DL-SINR: the DL loop's live SINR target (gamma_DL + cushion), the loop truth for the GUI.
    float    pktr_dl_target_db    = 0.0F;
--  /// KaiAir ch.4: the DL loop's live power-shed offset (dB from the ceiling), the DL actuator.
+-  /// KaiAir DL-SINR: the DL loop's live power-shed offset (dB from the ceiling), the DL actuator.
 +  /// KaiAir/PktR DL-SINR: the DL loop's live power-shed offset (dB from the ceiling), the DL actuator.
    float    pktr_dl_offset_db    = 0.0F;
    /// SNR in dB estimated for the PUCCH.
    float pucch_snr_db;
 diff --git a/lib/mac/mac_sched/uci_cell_decoder.cpp b/lib/mac/mac_sched/uci_cell_decoder.cpp
-index 49265414fb..11993878cf 100644
+index dc01f1dfb1..641f632415 100644
 --- a/lib/mac/mac_sched/uci_cell_decoder.cpp
 +++ b/lib/mac/mac_sched/uci_cell_decoder.cpp
 @@ -8,7 +8,7 @@
  #include "ocudu/scheduler/resource_grid_util.h"
  #include "ocudu/scheduler/result/pucch_info.h"
  #include "ocudu/scheduler/result/pusch_info.h"
--// KaiAir ch.4 custom-CSI decode helpers.
+-// KaiAir DL-SINR custom-CSI decode helpers.
 +// KaiAir/PktR DL-SINR custom-CSI decode helpers.
  #include <algorithm>
  #include <cmath>
@@ -99,9 +89,9 @@ index 49265414fb..11993878cf 100644
  }
  
  // ------------------------------------------------------------------------------------------------
--// KaiAir ch.4 true-SINR DL feedback (thesis §4.5.4.2, "decode_csi_10b_whole_reverse"): when
+-// KaiAir DL-SINR true-SINR DL feedback (whole-payload bit-reversed decode): when
 -// KAIAIR_CH4_CSI=1 the patched OAI UE sends a custom 10-bit payload in place of the standard CSI, 
-+// KaiAir/PktR DL true-SINR feedback (UE-reported) (thesis §4.5.4.2, "decode_csi_10b_whole_reverse"): when
++// KaiAir/PktR DL true-SINR feedback (UE-reported) (whole-payload bit-reversed decode): when
 +// KAIAIR_DL_SINR_CSI=1 the patched OAI UE sends a custom 10-bit payload in place of the standard CSI, 
  // LSB-first packed (bits 0-4 = quantized PDSCH-data RSSI, bits 5-9 = quantized interference) and
  // then bit-reversed before the PUCCH encoding chain. Reading the received spec-order bits MSB-first
@@ -126,7 +116,7 @@ index 49265414fb..11993878cf 100644
      const float f = (e != nullptr) ? std::strtof(e, nullptr) : 0.0F;
      return (f >= 0.25F && f <= 6.0F) ? f : 2.0F;
    }();
-@@ -86,12 +86,12 @@ static float kaiair_ch4_step_db()
+@@ -86,7 +86,7 @@ static float kaiair_ch4_step_db()
  }
  
  static csi_report_data
@@ -135,12 +125,6 @@ index 49265414fb..11993878cf 100644
                        std::optional<float>&                                                  dl_sinr_db_out)
  {
    csi_report_data data{.valid = false};
-   if (payload.size() != 10) {
--    return data; // wrong size: not the ch.4 payload (or UE toggle off), treat as invalid CSI
-+    return data; // wrong size: not the DL-SINR payload (or UE toggle off), treat as invalid CSI
-   }
-   uint16_t v = 0;
-   for (unsigned k = 0; k != 10; ++k) {
 @@ -101,7 +101,7 @@ kaiair_decode_ch4_csi(const bounded_bitset<uci_constants::MAX_NOF_CSI_PART1_OR_P
    }
    const unsigned q_rssi = v & 0x1F;
@@ -154,7 +138,7 @@ index 49265414fb..11993878cf 100644
            // Search for CSI report config with matching RNTI.
            for (const auto& expected_slot_uci : slot_ucis) {
              if (expected_slot_uci.rnti == uci_pdu.crnti) {
--              // KaiAir ch.4: the payload is the custom 10-bit (qRSSI, qI) report, not standard CSI.
+-              // KaiAir DL-SINR: the payload is the custom 10-bit (qRSSI, qI) report, not standard CSI.
 -              if (kaiair_ch4_enabled()) {
 -                pdu.csi = kaiair_decode_ch4_csi(pucch_f2f3f4->csi_part1_info->payload, pdu.kaiair_dl_sinr_db);
 +              // KaiAir/PktR DL-SINR: the payload is the custom 10-bit (qRSSI, qI) report, not standard CSI.
@@ -164,14 +148,14 @@ index 49265414fb..11993878cf 100644
                  pdu.csi = decode_csi_bits(*pucch_f2f3f4, expected_slot_uci.csi_rep_cfg);
                }
 diff --git a/lib/ran/csi_report/csi_report_on_pucch_helpers.cpp b/lib/ran/csi_report/csi_report_on_pucch_helpers.cpp
-index b6ae6bfdc4..992d8731d3 100644
+index 479890995b..992d8731d3 100644
 --- a/lib/ran/csi_report/csi_report_on_pucch_helpers.cpp
 +++ b/lib/ran/csi_report/csi_report_on_pucch_helpers.cpp
 @@ -9,7 +9,7 @@
  #include "ocudu/ran/csi_report/csi_report_data.h"
  #include "ocudu/ran/csi_report/csi_report_on_puxch_utils.h"
  #include "ocudu/support/error_handling.h"
--#include <cstdlib> // KaiAir ch.4: env toggle for the custom 10-bit CSI payload
+-#include <cstdlib> // KaiAir DL-SINR: env toggle for the custom 10-bit CSI payload
 +#include <cstdlib> // KaiAir/PktR DL-SINR: env toggle for the custom 10-bit CSI payload
  
  using namespace ocudu;
@@ -180,7 +164,7 @@ index b6ae6bfdc4..992d8731d3 100644
    }
  }
  
--// KaiAir ch.4 true-SINR DL feedback: when KAIAIR_CH4_CSI=1 the periodic PUCCH CSI report carries
+-// KaiAir DL-SINR true-SINR DL feedback: when KAIAIR_CH4_CSI=1 the periodic PUCCH CSI report carries
 +// KaiAir/PktR DL true-SINR feedback (UE-reported): when KAIAIR_DL_SINR_CSI=1 the periodic PUCCH CSI report carries
  // the custom 10-bit (qRSSI, qI) payload instead of the standard CQI report, so EVERY consumer of
  // the expected part-1 size (PUCCH PRB sizing, FAPI csi_part1_bit_length, the PHY F2 decoder and
@@ -199,7 +183,7 @@ index b6ae6bfdc4..992d8731d3 100644
    ocudu_assert(!config.subband.has_value(), "Subbands CSI reports are not supported on PUCCH.");
    using namespace units::literals;
  
--  // KaiAir ch.4: fixed 10-bit custom payload (5-bit RSSI + 5-bit interference).
+-  // KaiAir DL-SINR: fixed 10-bit custom payload (5-bit RSSI + 5-bit interference).
 -  if (kaiair_ch4_csi_enabled()) {
 +  // KaiAir/PktR DL-SINR: fixed 10-bit custom payload (5-bit RSSI + 5-bit interference).
 +  if (kaiair_dl_sinr_csi_enabled()) {
@@ -207,14 +191,14 @@ index b6ae6bfdc4..992d8731d3 100644
    }
  
 diff --git a/lib/scheduler/kaiair/pktr_dl_power_controller.h b/lib/scheduler/kaiair/pktr_dl_power_controller.h
-index bcb9318159..2f70425db6 100644
+index 0e66f2020e..2f70425db6 100644
 --- a/lib/scheduler/kaiair/pktr_dl_power_controller.h
 +++ b/lib/scheduler/kaiair/pktr_dl_power_controller.h
 @@ -58,7 +58,7 @@ public:
      if (not enabled_now()) {
        return;
      }
--    // KaiAir ch.4: while true-SINR feedback is flowing (SINR mode), the HARQ-BLER integrator is
+-    // KaiAir DL-SINR: while true-SINR feedback is flowing (SINR mode), the HARQ-BLER integrator is
 +    // KaiAir/PktR DL-SINR: while true-SINR feedback is flowing (SINR mode), the HARQ-BLER integrator is
      // parked, the SINR error drives the offset instead. BLER keeps updating for display.
      if (sinr_mode_) {
@@ -223,7 +207,7 @@ index bcb9318159..2f70425db6 100644
      offset_db_ = std::clamp(offset_db_, 0.0F, 15.0F);
    }
  
--  /// KaiAir ch.4 true-SINR DL feedback: feed one UE-reported DL SINR sample (dB, relative digital
+-  /// KaiAir DL-SINR true-SINR DL feedback: feed one UE-reported DL SINR sample (dB, relative digital
 +  /// KaiAir/PktR DL true-SINR feedback (UE-reported): feed one UE-reported DL SINR sample (dB, relative digital
    /// scale, the same scale the target is expressed in) with the live DL SINR target (gamma_DL +
    /// Cantelli cushion). Drives pwr_ctrl_offset by the SINR error directly (IPC set-point form):
@@ -232,7 +216,7 @@ index bcb9318159..2f70425db6 100644
      offset_db_ = std::clamp(offset_db_, 0.0F, 15.0F);
    }
  
--  /// KaiAir ch.4 sigma compensation: the offset (dB) that was in force during the slot the CURRENT
+-  /// KaiAir DL-SINR sigma compensation: the offset (dB) that was in force during the slot the CURRENT
 +  /// KaiAir/PktR DL-SINR sigma compensation: the offset (dB) that was in force during the slot the CURRENT
    /// report measured, one feedback delay (~1 report period) behind the live offset. Adding it back
    /// to the reported SINR yields the full-power-equivalent SINR, removing the loop's own actuation
@@ -241,55 +225,27 @@ index bcb9318159..2f70425db6 100644
    float    offset_db_;         // integrator state, shed-from-ceiling, [0,15]
    float    bler_ewma_ = 0.0F;  // display/debug only
    uint64_t nof_acks_  = 0;
--  // KaiAir ch.4 SINR mode (true-SINR feedback loop) state.
+-  // KaiAir DL-SINR SINR mode (true-SINR feedback loop) state.
 +  // KaiAir/PktR DL-SINR SINR mode (true-SINR feedback loop) state.
    bool     sinr_mode_           = false;
    float    sinr_gain_           = 0.25F; // dB of offset per dB of SINR error, per report (damped)
    float    sinr_step_max_db_    = 1.0F;  // per-report slew limit
-diff --git a/lib/scheduler/kaiair/pktr_link_state.h b/lib/scheduler/kaiair/pktr_link_state.h
-index cf09355ee2..41ff6f4f21 100644
---- a/lib/scheduler/kaiair/pktr_link_state.h
-+++ b/lib/scheduler/kaiair/pktr_link_state.h
-@@ -17,12 +17,12 @@
- // This mirrors the EWMA interference filter in the PktR papers (I_R(t+1) = c*I_R(t) + (1-c)*I_R(t+1)).
- //
- // The same EWMA is kept for the received signal power S (RSRP), so the full Cantelli sigma of the
--// PktR power-control law (pktR_CR Eq. (2), thesis ch.4 Eq. (4.45)) is available:
-+// PktR power-control law (pktR_CR Eq. (2), the PktR dissertation Eq. (4.45)) is available:
- //
- //   sigma_SINR = sqrt(Var[S] + Var[NI])
- //
- // Var[S] proxies the channel-gain variance Var[G] under quasi-static transmit power (the TPC
--// accumulator moves in sub-dB steps at steady state). The ch.4 refinement, slow/fast channel
-+// accumulator moves in sub-dB steps at steady state). The the dissertation refinement, slow/fast channel
- // decomposition with a Kalman predictor for G-hat, is a later increment.
- //
- // Scope: one instance per link (per UE, per direction).
-@@ -98,7 +98,7 @@ public:
-   float std_signal_db() const { return std::sqrt(var_sig_ > 0.0F ? var_sig_ : 0.0F); }
- 
-   /// Full Cantelli sigma of the PktR power-control law: sigma = sqrt(Var[S] + Var[NI]) (dB).
--  /// This is the std of (S - I) from pktR_CR Eq. (2) under the ch.4 independence decomposition
-+  /// This is the std of (S - I) from pktR_CR Eq. (2) under the DL-SINR independence decomposition
-   /// (Eq. 4.45), and the value the reliability cushion sigma*k(beta) must use.
-   float sigma_sinr_db() const
-   {
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index 5defe7d69d..e60d91052b 100644
+index 485a7ae137..4935bbe84e 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -79,14 +79,14 @@ struct pktr_settings {
    /// ldp.deadline_ms > 0 the per-transmission Cantelli beta becomes the LDP-derived p_req
    /// instead of ipc.beta, the deadline-aware composition (see pktr_ldp.h).
    ldp_config ldp{};
--  /// KaiAir ch.4 true-SINR DL feedback (thesis §4.5): interpret the periodic PUCCH CSI payload as
-+  /// KaiAir/PktR DL true-SINR feedback (UE-reported) (thesis §4.5): interpret the periodic PUCCH CSI payload as
+-  /// KaiAir DL-SINR true-SINR DL feedback (KAIAIR_DL_SINR_CSI): interpret the periodic PUCCH CSI payload as
++  /// KaiAir/PktR DL true-SINR feedback (UE-reported) (KAIAIR_DL_SINR_CSI): interpret the periodic PUCCH CSI payload as
    /// the custom 10-bit (qRSSI, qI) report instead of the standard CQI report, and drive the DL
 -  /// power loop from the reported DL SINR. Both ends (patched OAI UE with KAIAIR_CH4_CSI=1 and
 +  /// power loop from the reported DL SINR. Both ends (patched OAI UE with KAIAIR_DL_SINR_CSI=1 and
    /// this gNB) must have the toggle on, or the CSI payloads will be mutually garbled.
 -  bool ch4_csi = false;
--  /// Quantization step (dB per LSB) of the ch.4 5+5-bit report. MUST match the UE side
+-  /// Quantization step (dB per LSB) of the 5+5-bit report. MUST match the UE side
 -  /// (KAIAIR_CH4_CSI_STEP_DB there); the common reference offset cancels in SINR = (qRSSI-qI)*step.
 -  float ch4_step_db = 2.0F;
 +  bool dl_sinr_csi = false;
@@ -303,7 +259,7 @@ index 5defe7d69d..e60d91052b 100644
    s.ldp.pkt_beta         = std::clamp(env_float("KAIAIR_PKTR_PKT_BETA", s.ipc.beta), 0.0F, 0.999999F);
    s.ldp.first_tx_ms      = std::max(0.1F, env_float("KAIAIR_PKTR_TX0_MS", 5.0F));
    s.ldp.retx_interval_ms = std::max(0.1F, env_float("KAIAIR_PKTR_RETX_MS", 5.0F));
--  // KaiAir ch.4 true-SINR DL feedback + the separate DL SINR-target margin.
+-  // KaiAir DL-SINR true-SINR DL feedback + the separate DL SINR-target margin.
 -  s.ch4_csi     = env_flag("KAIAIR_CH4_CSI");
 -  s.ch4_step_db = std::clamp(env_float("KAIAIR_CH4_CSI_STEP_DB", s.ch4_step_db), 0.25F, 6.0F);
 +  // KaiAir/PktR DL true-SINR feedback (UE-reported) + the separate DL SINR-target margin.
@@ -316,7 +272,7 @@ index 5defe7d69d..e60d91052b 100644
    std::atomic<bool>      active{false};   // has the control file been read at least once?
    std::atomic<bool>      power{false};    // codesign AND power_control
    std::atomic<float>     gamma_db{3.0F};  // sinr_target_db
--  // KaiAir ch.4: separate DL SINR-target margin (dl_sinr_target_db in the ctrl file). NaN until the
+-  // KaiAir DL-SINR: separate DL SINR-target margin (dl_sinr_target_db in the ctrl file). NaN until the
 +  // KaiAir/PktR DL-SINR: separate DL SINR-target margin (dl_sinr_target_db in the ctrl file). NaN until the
    // key appears, so an old ctrl file without it falls back to the env value.
    std::atomic<float>     dl_gamma_db{NAN};
@@ -325,7 +281,7 @@ index 5defe7d69d..e60d91052b 100644
    const float       gamma    = json_float(s, "sinr_target_db", 3.0F);
    L.power.store(codesign and power, std::memory_order_relaxed);
    L.gamma_db.store(gamma, std::memory_order_relaxed);
--  // KaiAir ch.4: the DL target has its own slider; NaN fallback keeps env when the key is absent.
+-  // KaiAir DL-SINR: the DL target has its own slider; NaN fallback keeps env when the key is absent.
 +  // KaiAir/PktR DL-SINR: the DL target has its own slider; NaN fallback keeps env when the key is absent.
    L.dl_gamma_db.store(json_float(s, "dl_sinr_target_db", NAN), std::memory_order_relaxed);
    L.active.store(true, std::memory_order_relaxed);
@@ -334,29 +290,20 @@ index 5defe7d69d..e60d91052b 100644
                                                    : env_fallback;
  }
  
--/// KaiAir ch.4: effective DL SINR-target margin gamma_DL (dB), the live GUI value when the overlay
+-/// KaiAir DL-SINR: effective DL SINR-target margin gamma_DL (dB), the live GUI value when the overlay
 +/// KaiAir/PktR DL-SINR: effective DL SINR-target margin gamma_DL (dB), the live GUI value when the overlay
  /// carries a dl_sinr_target_db key, else the env value (KAIAIR_PKTR_DL_GAMMA_DB).
  inline float pktr_dl_gamma_now(float env_fallback)
  {
-@@ -324,7 +324,7 @@ inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls, const pktr_settin
-     return 0.0F;
-   }
-   // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per pktR_CR Eq. (2) / thesis
--  // ch.4 Eq. (4.46), NOT the interference std alone.
-+  // dissertation Eq. (4.46), NOT the interference std alone.
-   // LDP composition: with a deadline configured, the cushion targets the per-transmission
-   // reliability p_req(N(D)) needed to deliver the PACKET by its deadline via HARQ retries.
-   // Floored at min_cushion_db: the LDP-relaxed k(p_req) may not push the operating point into the
 diff --git a/lib/scheduler/logging/scheduler_metrics_handler.cpp b/lib/scheduler/logging/scheduler_metrics_handler.cpp
-index 4304b48b3d..4964647c66 100644
+index ae5551e384..4964647c66 100644
 --- a/lib/scheduler/logging/scheduler_metrics_handler.cpp
 +++ b/lib/scheduler/logging/scheduler_metrics_handler.cpp
 @@ -270,7 +270,7 @@ void cell_metrics_handler::kaiair_handle_tb_outcome(du_ue_index_t ue_index,
    (is_dl ? d.kaiair_ldp_dl_tx_sum : d.kaiair_ldp_ul_tx_sum) += nof_tx;
  }
  
--// KaiAir ch.4 true-SINR DL feedback: telemetry mirror of the UE-reported DL SINR (same EWMA form as
+-// KaiAir DL-SINR true-SINR DL feedback: telemetry mirror of the UE-reported DL SINR (same EWMA form as
 +// KaiAir/PktR DL true-SINR feedback (UE-reported): telemetry mirror of the UE-reported DL SINR (same EWMA form as
  // the scheduler-side ue_cell state; pushed as (sinr, 0) so sigma_sinr = std of the reported SINR).
  void cell_metrics_handler::kaiair_handle_dl_sinr(du_ue_index_t ue_index,
@@ -365,25 +312,25 @@ index 4304b48b3d..4964647c66 100644
    ret.pktr_ldp_ul_late    = data.kaiair_ldp_ul_late;
    ret.pktr_ldp_ul_failed  = data.kaiair_ldp_ul_failed;
    ret.pktr_ldp_ul_tx_sum  = data.kaiair_ldp_ul_tx_sum;
--  // KaiAir ch.4: UE-reported DL true-SINR statistics. The EWMA mean of the reported SINR is
+-  // KaiAir DL-SINR: UE-reported DL true-SINR statistics. The EWMA mean of the reported SINR is
 +  // KaiAir/PktR DL-SINR: UE-reported DL true-SINR statistics. The EWMA mean of the reported SINR is
    // -mean_ni (samples are pushed as (sinr, 0), so NI = 0 - sinr).
    ret.pktr_dl_sinr_samples = pktr_dl_link_state.nof_samples();
    ret.pktr_dl_sinr_db      = -pktr_dl_link_state.mean_ni_db();
 diff --git a/lib/scheduler/logging/scheduler_metrics_handler.h b/lib/scheduler/logging/scheduler_metrics_handler.h
-index 5ded0eb7ff..730b39e2e0 100644
+index b17d1a07e2..730b39e2e0 100644
 --- a/lib/scheduler/logging/scheduler_metrics_handler.h
 +++ b/lib/scheduler/logging/scheduler_metrics_handler.h
 @@ -117,11 +117,11 @@ class cell_metrics_handler final : public sched_metrics_ue_configurator
      /// KaiAir/PktR interference statistics, persistent across reports (its EWMA must keep memory).
      /// EWMA memory c comes from the runtime config (KAIAIR_PKTR_EWMA_C).
      kaiair::pktr_link_state                pktr_link_state{kaiair::pktr_runtime().ipc.ewma_c};
--    /// KaiAir ch.4: DL true-SINR statistics mirror (fed from the UE's custom CSI reports), 
+-    /// KaiAir DL-SINR: DL true-SINR statistics mirror (fed from the UE's custom CSI reports), 
 +    /// KaiAir/PktR DL-SINR: DL true-SINR statistics mirror (fed from the UE's custom CSI reports), 
      /// persistent across reports for the same reason. Samples are pushed as (sinr, 0), so the NI
      /// EWMA tracks -SINR and sigma_sinr the std of the reported DL SINR.
      kaiair::pktr_link_state                pktr_dl_link_state{kaiair::pktr_runtime().ipc.ewma_c};
--    /// KaiAir ch.4: the DL loop's live SINR target (gamma_DL + cushion) and its power-shed offset.
+-    /// KaiAir DL-SINR: the DL loop's live SINR target (gamma_DL + cushion) and its power-shed offset.
 +    /// KaiAir/PktR DL-SINR: the DL loop's live SINR target (gamma_DL + cushion) and its power-shed offset.
      float                                  kaiair_dl_target_db = 0.0F;
      float                                  kaiair_dl_offset_db = 0.0F;
@@ -392,46 +339,46 @@ index 5ded0eb7ff..730b39e2e0 100644
    /// abandonment).
    void kaiair_handle_tb_outcome(du_ue_index_t ue_index, bool is_dl, bool delivered, unsigned age_slots, unsigned nof_tx);
  
--  /// KaiAir ch.4 true-SINR DL feedback: register one UE-reported DL SINR sample plus the DL loop's
+-  /// KaiAir DL-SINR true-SINR DL feedback: register one UE-reported DL SINR sample plus the DL loop's
 +  /// KaiAir/PktR DL true-SINR feedback (UE-reported): register one UE-reported DL SINR sample plus the DL loop's
    /// live target (gamma_DL + cushion) and its power-shed offset (the DL actuator) for telemetry.
    void kaiair_handle_dl_sinr(du_ue_index_t ue_index, float dl_sinr_db, float dl_target_db, float dl_offset_db);
  
 diff --git a/lib/scheduler/uci_scheduling/uci_indication_selector.cpp b/lib/scheduler/uci_scheduling/uci_indication_selector.cpp
-index e83fa69dc8..e96c54fcef 100644
+index 966530c28a..e96c54fcef 100644
 --- a/lib/scheduler/uci_scheduling/uci_indication_selector.cpp
 +++ b/lib/scheduler/uci_scheduling/uci_indication_selector.cpp
 @@ -52,7 +52,7 @@ static uci_action create_action(const uci_indication::uci_pdu& pdu)
        is_dtx |= f2f3f4->harqs[i] == mac_harq_ack_report_status::dtx;
      }
      ret.csi = f2f3f4->csi;
--    // KaiAir ch.4 true-SINR DL feedback: forward the decoded UE-reported DL SINR to the scheduler.
+-    // KaiAir DL-SINR true-SINR DL feedback: forward the decoded UE-reported DL SINR to the scheduler.
 +    // KaiAir/PktR DL true-SINR feedback (UE-reported): forward the decoded UE-reported DL SINR to the scheduler.
      ret.kaiair_dl_sinr_db = f2f3f4->kaiair_dl_sinr_db;
    } else {
      const auto& pusch = std::get<uci_indication::uci_pdu::uci_pusch_pdu>(pdu.pdu);
 diff --git a/lib/scheduler/uci_scheduling/uci_indication_selector.h b/lib/scheduler/uci_scheduling/uci_indication_selector.h
-index f87002a8f7..cd26fb9622 100644
+index 2e1dc6db92..cd26fb9622 100644
 --- a/lib/scheduler/uci_scheduling/uci_indication_selector.h
 +++ b/lib/scheduler/uci_scheduling/uci_indication_selector.h
 @@ -28,7 +28,7 @@ struct uci_action {
    /// Timing Advance Offset measured for the UE.
    std::optional<phy_time_unit>   time_advance_offset;
    std::optional<csi_report_data> csi;
--  /// KaiAir ch.4 true-SINR DL feedback: UE-reported DL SINR (dB) from the custom CSI payload.
+-  /// KaiAir DL-SINR true-SINR DL feedback: UE-reported DL SINR (dB) from the custom CSI payload.
 +  /// KaiAir/PktR DL true-SINR feedback (UE-reported): UE-reported DL SINR (dB) from the custom CSI payload.
    std::optional<float> kaiair_dl_sinr_db;
  };
  
 diff --git a/lib/scheduler/ue_context/ue_cell.cpp b/lib/scheduler/ue_context/ue_cell.cpp
-index 1e82cd4bb3..46747fdeed 100644
+index c0a4ba49e2..46747fdeed 100644
 --- a/lib/scheduler/ue_context/ue_cell.cpp
 +++ b/lib/scheduler/ue_context/ue_cell.cpp
 @@ -169,7 +169,7 @@ std::optional<dl_harq_process_handle> ue_cell::handle_dl_ack_info(slot_point
    return h_dl;
  }
  
--// KaiAir ch.4 true-SINR DL feedback: one UE-reported DL SINR sample (dB, relative digital scale).
+-// KaiAir DL-SINR true-SINR DL feedback: one UE-reported DL SINR sample (dB, relative digital scale).
 +// KaiAir/PktR DL true-SINR feedback (UE-reported): one UE-reported DL SINR sample (dB, relative digital scale).
  // Feeds the DL link statistics (EWMA mean/var -> DL Cantelli sigma) and drives the DL power loop in
  // SINR mode toward the per-direction target gamma_DL + sigma*k(beta), the same IPC form as UL, with
@@ -446,19 +393,19 @@ index 1e82cd4bb3..46747fdeed 100644
                 fmt::underlying(rnti()),
                 dl_sinr_db,
 diff --git a/lib/scheduler/ue_context/ue_cell.h b/lib/scheduler/ue_context/ue_cell.h
-index deb75e74f2..360057fc1f 100644
+index 29bd75a02c..360057fc1f 100644
 --- a/lib/scheduler/ue_context/ue_cell.h
 +++ b/lib/scheduler/ue_context/ue_cell.h
 @@ -185,11 +185,11 @@ public:
    kaiair::pktr_dl_power_controller&       get_pktr_dl_power_controller() { return pktr_dl_pc_; }
    const kaiair::pktr_dl_power_controller& get_pktr_dl_power_controller() const { return pktr_dl_pc_; }
  
--  /// \brief KaiAir ch.4 true-SINR DL feedback: feed one UE-reported DL SINR sample (dB, relative
+-  /// \brief KaiAir DL-SINR true-SINR DL feedback: feed one UE-reported DL SINR sample (dB, relative
 +  /// \brief KaiAir/PktR DL true-SINR feedback (UE-reported): feed one UE-reported DL SINR sample (dB, relative
    /// scale) into the DL link state and the SINR-mode DL power loop.
    void kaiair_handle_dl_sinr(float dl_sinr_db);
  
--  /// \brief KaiAir ch.4: per-link DL statistics fed from the UE's true-SINR reports.
+-  /// \brief KaiAir DL-SINR: per-link DL statistics fed from the UE's true-SINR reports.
 +  /// \brief KaiAir/PktR DL-SINR: per-link DL statistics fed from the UE's true-SINR reports.
    const kaiair::pktr_link_state& get_pktr_dl_link_state() const { return pktr_dl_link_state_; }
  
@@ -467,13 +414,13 @@ index deb75e74f2..360057fc1f 100644
    /// KaiAir/PktR Tier-A IPC-DL closed-loop power controller, owned by value (one per UE-per-cell link).
    kaiair::pktr_dl_power_controller pktr_dl_pc_{};
  
--  /// KaiAir ch.4: per-link DL statistics from the UE's true-SINR reports. Reuses pktr_link_state
+-  /// KaiAir DL-SINR: per-link DL statistics from the UE's true-SINR reports. Reuses pktr_link_state
 +  /// KaiAir/PktR DL-SINR: per-link DL statistics from the UE's true-SINR reports. Reuses pktr_link_state
    /// with (sinr, "rsrp"=RSSI-relative) pushes, NI EWMA then tracks the reported interference and
    /// sigma_sinr the DL Cantelli sigma. Only the SINR (difference) is pushed here (signal term = 0
    /// reference), so var_signal stays 0 and sigma = std of the reported DL SINR, conservative and
 diff --git a/lib/scheduler/ue_scheduling/ue_event_manager.cpp b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
-index 6ffe697323..add744ac9f 100644
+index 876abb6d8a..add744ac9f 100644
 --- a/lib/scheduler/ue_scheduling/ue_event_manager.cpp
 +++ b/lib/scheduler/ue_scheduling/ue_event_manager.cpp
 @@ -481,6 +481,20 @@ void ue_cell_event_manager::handle_crc_indication(const ul_crc_indication& crc_i
@@ -501,7 +448,7 @@ index 6ffe697323..add744ac9f 100644
      handle_csi(*ue_cc, uci_sl, *action->csi);
    }
  
--  // KaiAir ch.4 true-SINR DL feedback: feed the UE-reported DL SINR into the per-UE DL link state
+-  // KaiAir DL-SINR true-SINR DL feedback: feed the UE-reported DL SINR into the per-UE DL link state
 +  // KaiAir/PktR DL true-SINR feedback (UE-reported): feed the UE-reported DL SINR into the per-UE DL link state
    // and SINR-mode power loop, and mirror it (plus the loop's ACTUAL live target, so the GUI red
    // line is the loop truth, not a recomputation) to the metrics handler for the telemetry view.

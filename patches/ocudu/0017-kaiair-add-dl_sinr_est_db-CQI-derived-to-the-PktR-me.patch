@@ -1,7 +1,7 @@
-From b25059d1b438e63e7fd66117d85d5f77ceea7219 Mon Sep 17 00:00:00 2001
+From fc71f26a7169369712d111e54bd072f8df5a32a1 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 21 Jul 2026 10:55:31 -0500
-Subject: [PATCH 17/53] kaiair: add dl_sinr_est_db (CQI-derived) to the PktR
+Subject: [PATCH 17/54] kaiair: add dl_sinr_est_db (CQI-derived) to the PktR
  metrics JSON
 
 The GUI needs a DL quality figure next to the UL SINR; DL SINR is not measurable

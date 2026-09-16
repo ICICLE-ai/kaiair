@@ -1,7 +1,7 @@
-From 9d5237f3f246de63989faed30f650874f0acd7ac Mon Sep 17 00:00:00 2001
+From 2043b93f8cb257aa10f85499bb754d8926391ea3 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 27 Jul 2026 12:26:35 -0500
-Subject: [PATCH 21/53] kaiair: default beta 0.99 -> 0.9 (bench-appropriate
+Subject: [PATCH 21/54] kaiair: default beta 0.99 -> 0.9 (bench-appropriate
  Cantelli cushion)
 
 0.99 (k~10) turns tenth-dB SINR jitter into multi-dB cushion and pins the loop at

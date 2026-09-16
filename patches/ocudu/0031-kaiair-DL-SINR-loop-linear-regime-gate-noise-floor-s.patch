@@ -1,7 +1,7 @@
-From c68ccaa97a8751567c961bb6c371864112837240 Mon Sep 17 00:00:00 2001
+From a75e66b8782aee070210a4465cee3130e22325f8 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 12 Aug 2026 11:17:09 -0500
-Subject: [PATCH 31/53] kaiair: DL SINR loop, linear-regime gate + noise-floor
+Subject: [PATCH 31/54] kaiair: DL SINR loop, linear-regime gate + noise-floor
  shed ceiling
 
 Bench bug: with enough shed the PDSCH sits at/below the UE noise floor, the

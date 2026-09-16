@@ -1,0 +1,174 @@
+From f061c2274774433c24166feb3023d2130db3d805 Mon Sep 17 00:00:00 2001
+From: Taimoor Ul Islam <tislam@iastate.edu>
+Date: Tue, 15 Sep 2026 19:24:24 -0500
+Subject: [PATCH 54/54] comment cleanup, source citations point to public
+ papers only
+
+---
+ .../metrics/consumers/kaiair_pktr_metrics_view.cpp   | 12 ++++++------
+ include/ocudu/asn1/xnap/kaiair_private_ies.h         |  4 ++--
+ lib/scheduler/kaiair/pktr_conflict_graph.h           |  4 ++--
+ lib/scheduler/kaiair/pktr_ldp.h                      |  2 +-
+ lib/scheduler/kaiair/pktr_link_state.h               |  6 +++---
+ lib/scheduler/kaiair/pktr_runtime_config.h           |  5 ++---
+ 6 files changed, 16 insertions(+), 17 deletions(-)
+
+diff --git a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+index 31781fa91f..cb8f6226b1 100644
+--- a/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
++++ b/apps/units/flexible_o_du/o_du_high/du_high/metrics/consumers/kaiair_pktr_metrics_view.cpp
+@@ -5,7 +5,7 @@
+ #include "lib/scheduler/kaiair/pktr_grk.h" // GRK exclusion-region / K, observe-only view
+ #include "lib/scheduler/kaiair/pktr_er_controller.h" // KaiAir multi-cell: live K/ER + ONAMA masks (B3-B5)
+ #include "lib/scheduler/kaiair/pktr_runtime_config.h"
+-#include "lib/scheduler/kaiair/pktr_signal_map.h" // auto-feed: live per-link gain map (T1.4)
++#include "lib/scheduler/kaiair/pktr_signal_map.h" // live per-link gain map
+ #include "ocudu/ran/rnti.h"
+ #include "fmt/format.h"
+ #include <algorithm>
+@@ -34,7 +34,7 @@ float cqi_to_sinr_db_estimate(float cqi)
+   return 1.9F * cqi - 5.0F;
+ }
+ 
+-/// KaiAir co-design (step 3): emit one machine-readable telemetry record per metrics interval to the
++/// KaiAir co-design telemetry: emit one machine-readable record per metrics interval to the
+ /// file named by KAIAIR_PKTR_METRICS_JSON (the co-design agent serves it at GET /metrics). Written
+ /// atomically (tmp + rename) so the agent never reads a partial file. No-op when the env var is unset.
+ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+@@ -70,7 +70,7 @@ void emit_pktr_metrics_json(const scheduler_cell_metrics& cell)
+   j += fmt::format(R"(,"ldp_on":{})", ldp_live.deadline_ms > 0.0F ? "true" : "false");
+   j += fmt::format(R"(,"ldp_deadline_ms":{:.1f})", ldp_live.deadline_ms > 0.0F ? ldp_live.deadline_ms : 10.0F);
+   j += fmt::format(R"(,"ldp_pkt_beta":{:.3f})", ldp_live.pkt_beta);
+-  // KaiAir multi-cell (plan B3-B5): one exclusion-region controller tick per metrics interval, 
++  // KaiAir multi-cell: one exclusion-region controller tick per metrics interval,
+   // live K/ER per UE from the UE's own neighbor-RSRP reports, peer links from the bus, conflict
+   // graph, ONAMA masks published to the scheduler's gate table. The "links" array below is what
+   // the agent's peer bus forwards to the other cells (PktR-Signal).
+@@ -425,12 +425,12 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+                      e_max,
+                      e_max - ue.pktr_mean_ni_db);
+ 
+-          // ---- GRK (observe-only) fed by the LIVE signal map (auto-feed T1.4, in-cell half). ----
++          // ---- GRK (observe-only) fed by the LIVE signal map (in-cell half). ----
+           // The map is updated every interval from the UE's own reference measurements (PUSCH RSRP +
+           // PHR-derived TX power), so the intended link's signal level is the map's EWMA-smoothed
+           // estimate, not a single-interval sample. Cross-cell interferers enter the SAME map: for
+           // now via the bench-calibrated KAIAIR_PKTR_GRK_XRX_DB pseudo-node (id 0xffff); the
+-          // neighbour-measurement feed (T1.5b) will replace that env path without touching the GRK
++          // neighbour-measurement feed will replace that env path without touching the GRK
+           // consumer below. Printed only, NOT enforced (no scheduling change yet).
+           const kaiair::pktr_settings& gcfg = kaiair::pktr_runtime();
+           if (gcfg.grk_view) {
+@@ -441,7 +441,7 @@ void kaiair::print_pktr_feedback(const scheduler_cell_metrics& cell)
+             const float tx_pwr_est = 23.0F - static_cast<float>(ue.last_phr.value_or(0));
+             map.update_gain(tx_id, rx_id, ue.pusch_rsrp_db, tx_pwr_est);
+             map.set_node(tx_id, tx_pwr_est, 1.0F);
+-            // Cross-cell (bench-calibrated until T1.5b): pseudo-node in received-power space (tx 0),
++            // Cross-cell (bench-calibrated): pseudo-node in received-power space (tx 0),
+             // so K = RSRP_signal - RSRP_interferer is the boundary signal-to-interferer ratio.
+             if (!std::isnan(gcfg.grk_xcell_rx_db)) {
+               map.update_gain(0xffffu, rx_id, gcfg.grk_xcell_rx_db, 0.0F);
+diff --git a/include/ocudu/asn1/xnap/kaiair_private_ies.h b/include/ocudu/asn1/xnap/kaiair_private_ies.h
+index 7fc6127524..229ffaf01f 100644
+--- a/include/ocudu/asn1/xnap/kaiair_private_ies.h
++++ b/include/ocudu/asn1/xnap/kaiair_private_ies.h
+@@ -1,7 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, XNAP PRIVATE MESSAGE payload (TS 38.423 §9.1.3.x PRIVATE MESSAGE).
++// KaiAir / PktR, XNAP PRIVATE MESSAGE payload (TS 38.423 Section 9.1.3 PRIVATE MESSAGE).
+ //
+ // 38.423 defines the PRIVATE MESSAGE procedure precisely for vendor-specific information exchange
+ // between NG-RAN nodes, but declares no private IEs itself, so the ASN.1 generator emitted an EMPTY
+@@ -9,7 +9,7 @@
+ //   PrivateIE-Container ::= SEQUENCE (SIZE(1..65535)) OF PrivateIE-Field
+ //   PrivateIE-Field     ::= { id PrivateIE-ID (local INTEGER 0..65535), criticality, value OPEN TYPE }
+ // with ONE private IE: id local = KAIAIR_PKTR_SIGNAL_IE_ID, value = OCTET STRING carrying the
+-// PktR-Signal record (per-link K, TX power, beta, ER, receiver-side RSRPs, the PktR paper §V).
++// PktR-Signal record (per-link K, TX power, beta, ER, receiver-side RSRPs, PktR paper Section V).
+ // Encoding follows the generator's own idioms exactly (private_ie_id_c / crit_e packers, open-type
+ // length guard, unbounded_octstring), so peers running this build interoperate and any standard
+ // XNAP decoder parses the envelope (and skips the private IE it does not know).
+diff --git a/lib/scheduler/kaiair/pktr_conflict_graph.h b/lib/scheduler/kaiair/pktr_conflict_graph.h
+index c29a0f08e1..5a42cfc963 100644
+--- a/lib/scheduler/kaiair/pktr_conflict_graph.h
++++ b/lib/scheduler/kaiair/pktr_conflict_graph.h
+@@ -1,7 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright (C) 2021-2026 Software Radio Systems Limited
+ // SPDX-License-Identifier: BSD-3-Clause-Open-MPI
+ //
+-// KaiAir / PktR, conflict graph over links (PRKS-TWC §III-D; plan step B4).
++// KaiAir / PktR, conflict graph over links (PRKS paper Section III-D).
+ //
+ // A link is (transmitter T, receiver R, direction). Under the PRK/GRK model the exclusion region
+ // of link (S,R) with parameter K is E_{S,R} = { C : G(C,R) >= G(S,R)/K }, i.e. in dB
+@@ -66,7 +66,7 @@ inline bool in_exclusion_region(const cg_link& l, const node_id& c)
+   return it->second >= l.signal_rx_dbm - l.k_db;
+ }
+ 
+-/// Conflict predicate (PRKS §III-D): shared end node, or mutual-ER membership in either direction.
++/// Conflict predicate (PRKS paper Section III-D): shared end node, or mutual-ER membership in either direction.
+ inline bool links_conflict(const cg_link& a, const cg_link& b)
+ {
+   if (a.id == b.id) {
+diff --git a/lib/scheduler/kaiair/pktr_ldp.h b/lib/scheduler/kaiair/pktr_ldp.h
+index c2fbd5c07d..a1d074ae42 100644
+--- a/lib/scheduler/kaiair/pktr_ldp.h
++++ b/lib/scheduler/kaiair/pktr_ldp.h
+@@ -4,7 +4,7 @@
+ // KaiAir / PktR, LDP (deadline-aware retransmission-budget) core, per LDP-TR.
+ //
+ // PRK-family URLLC delivers a packet with reliability P (pkt_beta) BEFORE its deadline D. The
+-// paper's architecture (LDP-TR §II-B): power control (PktR) holds the PER-TRANSMISSION success
++// paper's architecture (LDP paper Section II-B): power control (PktR) holds the PER-TRANSMISSION success
+ // probability at a controlled level p, p is an INPUT here, never a derived quantity, and LDP
+ // translates the probabilistic requirement into a deterministic reservation:
+ //
+diff --git a/lib/scheduler/kaiair/pktr_link_state.h b/lib/scheduler/kaiair/pktr_link_state.h
+index 9c61aae412..056dd6a2e1 100644
+--- a/lib/scheduler/kaiair/pktr_link_state.h
++++ b/lib/scheduler/kaiair/pktr_link_state.h
+@@ -22,8 +22,8 @@
+ //   sigma_SINR = sqrt(Var[S] + Var[NI])
+ //
+ // Var[S] proxies the channel-gain variance Var[G] under quasi-static transmit power (the TPC
+-// accumulator moves in sub-dB steps at steady state). A slow/fast channel
+-// decomposition with a Kalman predictor for G-hat, is a later increment.
++// accumulator moves in sub-dB steps at steady state). A slow/fast channel decomposition with a
++// Kalman predictor for G-hat is a possible later refinement.
+ //
+ // Scope: one instance per link (per UE, per direction).
+ 
+@@ -98,7 +98,7 @@ public:
+   float std_signal_db() const { return std::sqrt(var_sig_ > 0.0F ? var_sig_ : 0.0F); }
+ 
+   /// Full Cantelli sigma of the PktR power-control law: sigma = sqrt(Var[S] + Var[NI]) (dB).
+-  /// This is the std of (S - I) from the PktR paper Eq. (2) under the independence decomposition
++  /// This is the std of (S - I) from the PktR paper Eq. (2) under the independence decomposition,
+   /// and the value the reliability cushion sigma*k(beta) must use.
+   float sigma_sinr_db() const
+   {
+diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
+index 58037980ee..11b2654f41 100644
+--- a/lib/scheduler/kaiair/pktr_runtime_config.h
++++ b/lib/scheduler/kaiair/pktr_runtime_config.h
+@@ -62,7 +62,7 @@ struct pktr_settings {
+   /// pktr_grk would size against E_max[I_R]. Not enforced (no scheduling change), diagnostics only.
+   bool grk_view = false;
+   /// Bench-calibrated cross-cell interferer received power at this gNB (dBFS), for the observe-only GRK
+-  /// view on the 2-cell bench, until the automatic neighbour-RSRP -> signal-map feed exists (T1.4/T1.5b).
++  /// view on the 2-cell bench, until the automatic neighbour-RSRP signal-map feed exists.
+   /// NaN => no interferer configured (single cell => ER empty).
+   float grk_xcell_rx_db = NAN;
+   /// The bench interferer's activity factor E[alpha] in [0,1].
+@@ -373,8 +373,7 @@ inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls, const pktr_settin
+   if (not pktr_actuate_now(s.actuate) or not ls.has_samples() or ls.sigma_sinr_db() > s.sigma_transient_db) {
+     return 0.0F;
+   }
+-  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per the PktR paper Eq. (2) /
+-  // NOT the interference std alone.
++  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per the PktR paper Eq. (2), NOT the interference std alone.
+   // The cushion is sized by the STATIC per-transmission beta (LDP-TR: power control holds the
+   // per-tx reliability p; LDP derives the retx budget FROM p and never feeds back into power).
+   // Floored at min_cushion_db as a bench safety margin (bistable-collapse zone).

@@ -1,7 +1,7 @@
-From 9a96a58a50208f85294c17e78906cf0f9de7fcff Mon Sep 17 00:00:00 2001
+From 0192d403b0e71a341c5f7b7b14c4a3c3a030ad8a Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Sat, 12 Sep 2026 19:15:15 -0500
-Subject: [PATCH 51/53] kaiair: global slot index derived fresh from the PTP
+Subject: [PATCH 51/54] kaiair: global slot index derived fresh from the PTP
  wall clock every call, the once-latched offset went stale when slot_point
  wrapped (20480 slots / 10.24 s), silently divergent cross-cell ONAMA masks by
  the cells' start-time difference; wrap regression test

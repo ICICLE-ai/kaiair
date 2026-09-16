@@ -1,7 +1,7 @@
-From 9c71e7264eb64554151a27b40e6265060e7f1f16 Mon Sep 17 00:00:00 2001
+From 450556229ece74d68fbaa81f3c05b8fd64bc8ff6 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 12 Aug 2026 18:03:23 -0500
-Subject: [PATCH 32/53] kaiair: steady the DL target, EWMA-smoothed cushion
+Subject: [PATCH 32/54] kaiair: steady the DL target, EWMA-smoothed cushion
  (tau ~1 s) + floor-outlier gate on charted telemetry
 
 The raw sigma*k cushion jumped 3-6 dB report-to-report (2 dB report quantization

@@ -1,7 +1,7 @@
-From 8b8d5289ec1ea9c56d4334c16a8e49dee06dfc21 Mon Sep 17 00:00:00 2001
+From a7b71bcc0ff7caadf489fb9057bf12d02f75a757 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 6 Jul 2026 14:43:39 -0500
-Subject: [PATCH 13/53] kaiair: PktR signal (gain) map, feeds GRK
+Subject: [PATCH 13/54] kaiair: PktR signal (gain) map, feeds GRK
  exclusion-region sizing (Phase 1, T1.3)
 
 The "who-hears-whom" gain map GRK runs on. Path gains G(tx,rx) = rx_reference_power

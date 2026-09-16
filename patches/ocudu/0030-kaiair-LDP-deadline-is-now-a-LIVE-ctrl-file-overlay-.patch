@@ -1,7 +1,7 @@
-From efb0ac4031318d27367855a7ebcd2fce632eae51 Mon Sep 17 00:00:00 2001
+From 66cdb41f130097261cb66e55178e2560aec00068 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 18:50:10 -0500
-Subject: [PATCH 30/53] kaiair: LDP deadline is now a LIVE ctrl-file overlay
+Subject: [PATCH 30/54] kaiair: LDP deadline is now a LIVE ctrl-file overlay
  (ldp_deadline_ms), no restarts
 
 The GUI LDP toggle previously restarted the agent + gNB; the dashboard's
@@ -66,7 +66,7 @@ index 637cce4f8f..7b095b5895 100644
                     x_req,
                     x_req <= nof_tx ? "schedulable" : "NOT schedulable in deadline");
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index d77876e9ca..bf2119ba97 100644
+index 3d2a66c1ba..1595ca1f3b 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -188,6 +188,9 @@ struct live_controls_t {

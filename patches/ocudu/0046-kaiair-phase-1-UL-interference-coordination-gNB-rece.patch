@@ -1,7 +1,7 @@
-From 7d0ceee850a706a0ae26e78d4af172aa8aa1a586 Mon Sep 17 00:00:00 2001
+From 341e279c66d3714295699e254573575fc931d892 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Wed, 26 Aug 2026 12:01:43 -0500
-Subject: [PATCH 46/53] kaiair: phase-1 UL interference coordination,
+Subject: [PATCH 46/54] kaiair: phase-1 UL interference coordination,
  gNB-receiver exclusion regions via TDD reciprocity, UL conflict links, UL
  ONAMA masks (can_allocate_pusch goes live), ulink Xn rows, JSON fields, unit
  test
@@ -49,7 +49,7 @@ index 186d1b51c0..31781fa91f 100644
                         std::isfinite(pic.serving.rsrp_dbm) ? pic.serving.rsrp_dbm : -999.0F,
                         pic.neighbors.size(),
 diff --git a/include/ocudu/kaiair/pktr_neighbor_store.h b/include/ocudu/kaiair/pktr_neighbor_store.h
-index 415498af91..1ae1a3097b 100644
+index dd2b8d5749..0a16192f19 100644
 --- a/include/ocudu/kaiair/pktr_neighbor_store.h
 +++ b/include/ocudu/kaiair/pktr_neighbor_store.h
 @@ -48,6 +48,17 @@ struct ue_meas_picture {

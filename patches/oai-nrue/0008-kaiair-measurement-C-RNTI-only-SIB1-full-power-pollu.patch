@@ -1,7 +1,7 @@
-From 3e4b489847aa351991c6284912190e2f787692f1 Mon Sep 17 00:00:00 2001
+From 82cb84251da2f32b9aa9277a75a3c7812266edf2 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 12:38:36 -0500
-Subject: [PATCH 08/12] kaiair: ch.4 measurement C-RNTI-only (SIB1 full-power
+Subject: [PATCH 08/13] kaiair: measurement C-RNTI-only (SIB1 full-power
  pollution blinded the DL loop)
 
 ---
@@ -9,12 +9,12 @@ Subject: [PATCH 08/12] kaiair: ch.4 measurement C-RNTI-only (SIB1 full-power
  1 file changed, 4 insertions(+), 1 deletion(-)
 
 diff --git a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
-index 34296159ce..7e884bf973 100644
+index 4d9e67eb8b..9b4cc5896e 100644
 --- a/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
 +++ b/openair1/PHY/NR_UE_TRANSPORT/nr_dlsch_demodulation.c
 @@ -978,7 +978,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
-     // KaiAir ch.4 true-SINR DL feedback: accumulate this symbol's PDSCH-data RSSI (Eq. 4.52) and
-     // unused-RB interference (Eq. 4.54); finalize the slot-level averages (Eq. 4.53/4.55) at the
+     // KaiAir DL-SINR true-SINR DL feedback: accumulate this symbol's PDSCH-data RSSI and
+     // unused-RB interference; finalize the slot-level averages at the
      // last PDSCH symbol so the MAC CSI builder always sees a coherent (RSSI, I) pair.
 -    {
 +    // C-RNTI ONLY: SIB/paging PDSCH are broadcast at FULL power, while the gNB's per-UE DL power

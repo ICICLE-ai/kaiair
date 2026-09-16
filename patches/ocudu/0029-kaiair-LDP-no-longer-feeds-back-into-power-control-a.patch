@@ -1,7 +1,7 @@
-From a17294f5c8e6359d77b666a9686534fb3a1bda91 Mon Sep 17 00:00:00 2001
+From ec5436a1e8d1a2c2465ba4ad136bef3cc27917ac Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Tue, 11 Aug 2026 17:46:37 -0500
-Subject: [PATCH 29/53] kaiair: LDP no longer feeds back into power control
+Subject: [PATCH 29/54] kaiair: LDP no longer feeds back into power control
  (align with LDP-TR)
 
 The paper's direction is p -> X: power control holds the per-transmission
@@ -170,16 +170,16 @@ index 07b79e0bcf..c2fbd5c07d 100644
  
  } // namespace kaiair
 diff --git a/lib/scheduler/kaiair/pktr_runtime_config.h b/lib/scheduler/kaiair/pktr_runtime_config.h
-index e60d91052b..d77876e9ca 100644
+index 4935bbe84e..3d2a66c1ba 100644
 --- a/lib/scheduler/kaiair/pktr_runtime_config.h
 +++ b/lib/scheduler/kaiair/pktr_runtime_config.h
 @@ -323,14 +323,12 @@ inline float pktr_ul_sinr_offset_db(const pktr_link_state& ls, const pktr_settin
    if (not pktr_actuate_now(s.actuate) or not ls.has_samples() or ls.sigma_sinr_db() > s.sigma_transient_db) {
      return 0.0F;
    }
--  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per pktR_CR Eq. (2) / thesis
-+  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per pktR_CR Eq. (2) /
-   // dissertation Eq. (4.46), NOT the interference std alone.
+-  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per the PktR paper Eq. (2),
++  // Full Cantelli sigma = sqrt(Var[S] + Var[NI]), the std of (S - I) per the PktR paper Eq. (2) /
+   // NOT the interference std alone.
 -  // LDP composition: with a deadline configured, the cushion targets the per-transmission
 -  // reliability p_req(N(D)) needed to deliver the PACKET by its deadline via HARQ retries.
 -  // Floored at min_cushion_db: the LDP-relaxed k(p_req) may not push the operating point into the

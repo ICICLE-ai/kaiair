@@ -1,7 +1,7 @@
-From ed1725cc210cf620a2d92b4f50739d69a28b4694 Mon Sep 17 00:00:00 2001
+From 896ea63f162579db3fd0d40c9272d18356c9509a Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Fri, 31 Jul 2026 14:48:08 -0500
-Subject: [PATCH 05/12] kaiair: tolerate illegal n_dmrs_cdm_groups
+Subject: [PATCH 05/13] kaiair: tolerate illegal n_dmrs_cdm_groups
  (corrupt/foreign DCI) - drop PDSCH instead of AssertFatal
 
 Post-antenna-swap the UE crash-looped on n_dmrs_cdm_groups==0 right after RA

@@ -1,7 +1,7 @@
-From 36dae97fa81fcd3c60a69370c289b02eb59f28bc Mon Sep 17 00:00:00 2001
+From 0ba6b22e89e6d4604ab31bf4330c3dafdc9bc3d8 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 13 Jul 2026 16:44:59 -0500
-Subject: [PATCH 15/53] kaiair: PktR live control-file overlay, GUI can toggle
+Subject: [PATCH 15/54] kaiair: PktR live control-file overlay, GUI can toggle
  power/gamma without restart
 
 Co-design step 2. Adds an optional runtime overlay to pktr_runtime_config: when

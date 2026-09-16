@@ -1,7 +1,7 @@
-From f6397f32467ffe4d27b83595dba96dfdd0424eb7 Mon Sep 17 00:00:00 2001
+From 4964c7a557f716bc7a3ac4f858e6ab12a70b3fe7 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 6 Jul 2026 13:41:02 -0500
-Subject: [PATCH 12/53] kaiair: GRK (Gain-Ratio-K) interference model +
+Subject: [PATCH 12/54] kaiair: GRK (Gain-Ratio-K) interference model +
  K-adaptation core (Phase 3)
 
 Slow-loop interference-coordination substrate. Given a gain map (per-interferer

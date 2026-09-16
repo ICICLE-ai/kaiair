@@ -1,7 +1,7 @@
-From 182f02af3f9096e49317419d47bcd2310271c6f8 Mon Sep 17 00:00:00 2001
+From 56160bad2d545771e2adbd4b0269ea2d37a0fbb8 Mon Sep 17 00:00:00 2001
 From: Taimoor Ul Islam <tislam@iastate.edu>
 Date: Mon, 10 Aug 2026 12:22:04 -0500
-Subject: [PATCH 06/12] kaiair: bound the DIGITAL UL backoff depth
+Subject: [PATCH 06/13] kaiair: bound the DIGITAL UL backoff depth
  (KAIAIR_UL_PWR_MIN_DB, default 20) - root cause of the week's noise-burst
  collapse
 
