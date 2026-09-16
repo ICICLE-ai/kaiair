@@ -70,7 +70,7 @@ ru_sdr:
   clock: external
   sync: external
   srate: 46.08
-  tx_gain: 14
+  tx_gain: 20
   rx_gain: 30
 
 expert_phy:
