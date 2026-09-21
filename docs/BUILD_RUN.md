@@ -16,25 +16,51 @@ side, one container per node on the ARA testbed.
 - Multi-cell timing. PTP (ptp4l and phc2sys) runs on the host. Containers share the host
   kernel clock, so they inherit the time sync. The 10 MHz and PPS distribution from octoclock to the gNB radios is mandatory (or use external sync through GPSDO).
 
+## Before you start
+
+The patch series are applied with `git am`, which records a committer and refuses to run
+without a git identity. Fresh containers usually have none, so set one first.
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
+All commands below run from one working folder that holds this repository next to the
+upstream clones.
+
+```bash
+git clone https://github.com/ICICLE-ai/kaiair.git
+```
+
 ## gNB (OCUDU + KaiAir patches)
 
 ```bash
-# 1. Get OCUDU at the pinned base (see patches/ocudu/BASE for the exact commit)
-git clone https://github.com/ocudu/ocudu.git && cd ocudu
-git checkout $(cat ../patches/ocudu/BASE)
+# 1. Get OCUDU
+git clone https://github.com/ocudu/ocudu.git
 
-# 2. Apply the KaiAir series
-git am ../patches/ocudu/*.patch      # or: ./scripts/apply_patches.sh ocudu
+# 2. Check out the pinned base (patches/ocudu/BASE) and apply the KaiAir series
+./kaiair/scripts/apply_patches.sh ocudu ./ocudu
 
 # 3. Build
-mkdir build && cd build
+cd ocudu && mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j"$(nproc)" gnb
+make -j8 gnb
 
 # 4. Unit tests (all KaiAir suites)
-make -j"$(nproc)" $(ls ../tests/unittests/scheduler/kaiair | grep _test | sed 's/\.cpp//')
+make -j8 $(ls ../tests/unittests/scheduler/kaiair | grep _test | sed 's/\.cpp//')
 ctest -R pktr
 ```
+
+The script creates a branch named `kaiair` at the base commit and applies the series on
+top. It stops with a message if the identity is missing, the clone has local changes, or
+an earlier `git am` was left unfinished.
+
+Pick the job count by memory, not by core count. Compiling the generated ASN.1 sources
+takes more than 1 GB per job, so `make -j"$(nproc)"` on a many-core machine with a memory
+cap runs out of memory and the compiler is killed (`Killed signal terminated program
+cc1plus`). Use about one job per GB of free memory, `-j8` under an 8 GB container limit.
+A build that was killed can be resumed with the same `make` command and a lower job count.
 
 ## UE (OAI nrUE + KaiAir patches)
 
@@ -44,10 +70,10 @@ case, since the custom 10-bit CSI format must not be enabled against a UE that d
 produce it.
 
 ```bash
-git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git && cd openairinterface5g
-git checkout $(cat ../patches/oai-nrue/BASE)
-git am ../patches/oai-nrue/*.patch
-cd cmake_targets && ./build_oai -w USRP --nrUE --ninja
+# from the same working folder as above
+git clone https://gitlab.eurecom.fr/oai/openairinterface5g.git
+./kaiair/scripts/apply_patches.sh oai-nrue ./openairinterface5g
+cd openairinterface5g/cmake_targets && ./build_oai -w USRP --nrUE --ninja
 ```
 
 ## Configuration
@@ -119,8 +145,10 @@ runs. Defaults in `lib/scheduler/kaiair/pktr_runtime_config.h`.
 ### Single cell
 
 ```bash
-# gNB (through the agent, see docs/AGENT_API.md)
-python3 codesign-api/kaiair_agent.py --role gnb --config agent.gnb.json &
+# gNB, through the agent (see docs/AGENT_API.md)
+cp kaiair/codesign-api/agent.gnb.example.json agent.gnb.json
+# edit agent.gnb.json, set cwd to <path_to_ocudu>/build/apps/gnb and cmd to your gNB YAML
+python3 kaiair/codesign-api/kaiair_agent.py --role gnb --config agent.gnb.json &
 curl -X POST localhost:5000/gnb/start
 
 # UE (patched OAI example)
@@ -128,6 +156,9 @@ KAIAIR_UL_PWR_APPLY=1 KAIAIR_UL_PWR_MIN_DB=6 KAIAIR_DL_SINR_CSI=1 \
 ./nr-uesoftmodem -O ue.conf -r 106 --numerology 1 --band 78 -C <freq> \
   --ue-fo-compensation -E --ssb 42 --ue-rxgain 120 --usrp-args "serial=<sn>"
 ```
+
+If the start request returns an error, the message names the config field to fix. Once
+started, the gNB console output goes to the file set as `log` in the agent config.
 
 The gNB can also be started manually, equivalent to what the agent launches:
 

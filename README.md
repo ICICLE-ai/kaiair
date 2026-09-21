@@ -59,11 +59,13 @@ https://github.com/ICICLE-ai/kaiair/issues.
 
 ## Install
 
-Clone each upstream at its pinned base commit (recorded in `patches/ocudu/BASE` and
-`patches/oai-nrue/BASE`), apply the KaiAir patch series with
-`scripts/apply_patches.sh`, and build. The full walkthrough, including the host
-environment, configuration, and multi-cell bring-up, is in
-[docs/BUILD_RUN.md](docs/BUILD_RUN.md).
+Clone this repository and each upstream into one working folder, then run
+`scripts/apply_patches.sh`. It checks out the pinned base commit (recorded in
+`patches/ocudu/BASE` and `patches/oai-nrue/BASE`) and applies the KaiAir patch series
+with `git am`, so git needs a user name and email set beforehand. Build with a job count
+that fits your memory rather than your core count, `-j8` under an 8 GB limit. The full
+walkthrough, including the host environment, configuration, and multi-cell bring-up, is
+in [docs/BUILD_RUN.md](docs/BUILD_RUN.md).
 
 ## Run
 

@@ -14,13 +14,24 @@ and exposes the runtime control. A separate local web dashboard
 
 ## Running the agent
 
+The repository ships an example config. Copy it and edit the copy before the first start.
+
 ```bash
-python3 kaiair_agent.py --role gnb --config agent.gnb.json
+cp codesign-api/agent.gnb.example.json agent.gnb.json
+python3 codesign-api/kaiair_agent.py --role gnb --config agent.gnb.json
 ```
 
-The JSON config carries per-node facts: working directory and launch command, PCI, SSB
-power, gate mode at launch, whether the UE is patched (`dl_sinr_csi`), control/metrics
-file paths, and optionally the peer list for the UDP dev fallback. Examples under `codesign-api/`.
+The JSON config carries per-node facts. Three fields must match your machine.
+
+| Field | Set it to |
+|---|---|
+| `cwd` | the folder holding the gNB binary, `<path_to_ocudu>/build/apps/gnb` |
+| `cmd` | the launch command, run inside `cwd`, for example `["./gnb", "-c", "gnb.yaml"]` |
+| `log` | a writable file for the gNB console output |
+
+The remaining fields cover the PCI, SSB power, gate mode at launch, whether the UE is
+patched (`dl_sinr_csi`), the control and metrics file paths, and optionally the peer list
+for the UDP dev fallback.
 
 ## HTTP endpoints (port 5000)
 
@@ -29,7 +40,7 @@ file paths, and optionally the peer list for the UDP dev fallback. Examples unde
 | Endpoint | Effect |
 |---|---|
 | `GET /health` | `{"role": "gnb", "online": true, "running": <bool>}` |
-| `POST /gnb/start`, `POST /gnb/stop` | start / stop the gNB (graceful stop. The agent waits for a clean radio release) |
+| `POST /gnb/start`, `POST /gnb/stop` | start / stop the gNB (graceful stop. The agent waits for a clean radio release). Start returns HTTP 409 with a message when `cwd`, the binary in `cmd`, or the `log` folder is missing |
 | `POST /ue/start`, `POST /ue/stop` | same for a UE host |
 
 On start, the agent reads the control file and builds the environment: metrics and GRK

@@ -11,7 +11,7 @@
 # Run:  python3 kaiair_agent.py --role gnb   [--config agent.gnb.json] [--port 5000]
 #       python3 kaiair_agent.py --role ue    [--config agent.ue.json]
 
-import argparse, json, os, pty, select, signal, subprocess, sys, termios, threading, time
+import argparse, json, os, pty, select, shutil, signal, subprocess, sys, termios, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ----------------------------------------------------------------- configuration
@@ -153,10 +153,33 @@ def _pty_run(cmd, cwd, env, logpath, toggle_after, stop_evt):
         logf.close()
 
 
+def launch_problem():
+    """Return a message when the configured launch cannot work, else None."""
+    cwd, cmd = CFG.get("cwd"), CFG.get("cmd") or []
+    if not cwd or not os.path.isdir(cwd):
+        return f"cwd {cwd!r} does not exist, set it in the agent config"
+    if not cmd:
+        return "cmd is empty in the agent config"
+    exe = cmd[0]
+    if os.sep in exe:
+        path = exe if os.path.isabs(exe) else os.path.join(cwd, exe)
+        if not os.access(path, os.X_OK):
+            return f"{path} is missing or not executable, check cwd and cmd in the agent config"
+    elif not shutil.which(exe):
+        return f"{exe!r} not found on PATH"
+    log_dir = os.path.dirname(os.path.abspath(CFG.get("log", "")))
+    if not os.access(log_dir, os.W_OK):
+        return f"log directory {log_dir} is not writable"
+    return None
+
+
 def start_child():
     with _lock:
         if _proc["popen"] and _proc["popen"].poll() is None:
             return False, "already running"
+    problem = launch_problem()
+    if problem:
+        return False, problem
     ctrl = read_ctrl()
     env = ctrl_to_env(ctrl)
     stop_evt = threading.Event()
