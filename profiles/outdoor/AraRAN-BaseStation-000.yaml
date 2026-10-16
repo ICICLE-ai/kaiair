@@ -1,0 +1,402 @@
+heat_template_version: '2015-04-30'
+
+description: 'Deploy KaiAir Base Station (gNB) on AraRAN'
+
+parameter_groups:
+
+  - label: 'Login'
+    description: 'Login parameter group'
+    parameters:
+    - LOGIN_USERNAME
+    - SSH_PUBLIC_KEY
+
+  - label: 'Lease'
+    description: 'Lease parameter group'
+    parameters:
+    - ARA_SITE_NAME
+    - ARA_RESOURCE_TYPE
+    - ARA_DEVICE_TYPE
+    - ARA_DEVICE_ID
+
+  - label: 'Container'
+    description: 'Container parameter group'
+    parameters: 
+    - ARA_IMAGE
+    - ARA_CPUS
+    - ARA_MEM
+
+  - label: 'Network'
+    description: 'Network parameter group'
+    parameters:
+    - ARA_NETWORK
+    - ARA_SUBNET
+    - GNB_SDR_INTERFACE_IP 
+
+parameters:
+
+  LOGIN_USERNAME:
+    type: string
+    label: 'Login Username'
+    description: 'Create a (non-root) login user within the container.'
+    default: 'icicle'
+    hidden: false
+    immutable: true
+
+  SSH_PUBLIC_KEY:
+    type: string
+    label: 'SSH Public Key'
+    description: 'Authorize an SSH public key for the default (non-root) user.'
+    default: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDSzjVQxM3vWDsGp9qiZl9bB9VOcj0uaIidaaygSoDZ3x7sDOwX54OKQZITR6n62So0JDFSHP6clu5ZMqqXxD904ngKQUcWjC5RCklhTg0YgYWUTSCJcbn664/YPSr6Nopl5uentRm9r8dGUlA6i5tdRmJntpt8oWXDDNR+bYdRv956FBTYoP+Q0whweiNv4YjTNMu5ZkKEXR5zwj+VULSzz4Ra5GdM9On6bXL9zUC/vr+MYZTy86Xsu9Zx1GkPwhjNqQT0CafziyvYVFONljBBZ3EUpoV5VnQaYtvIJ3+oTzOLAeT1ToLp7gqO+nAknhXQMKauNIN18AAgZ0BC1+GT2ql2FWrbJ92QqWLtaBXeJ9DWjUX2AimBClRv2glqqtYIJF8E/nU8l6JuKQO3DXtohTb4IrZKKivPfGdBBiXW3Uo9Do6DZtCp7ju5LYThoYfPel5ZOiMlbY23WZXck9IJqaDbNK4jcu8vvrc+N9J3LG3V1uJY1+trU9NIZxsz4FMpbVu1FvzhonsTVf13826oW56CsSKPhhsSF8v/iwg82DlXnz0WKtsTRB0PRlnHGEssBDNvCqn8OPeBRXzdp038Qz6SsKIGOZcVoUod9xuQpCMApyPwBcGt5E2JP/KUHEHU95a/pljidYJYj/MtbCrgP92+msEBh7l+BffaL8Ps3Q== mkandes@hardtack'
+    hidden: false
+    immutable: true
+
+  ARA_SITE_NAME:
+    type: string
+    label: 'ARA Site Name'
+    description: 'Choose an ARA Site Name.'
+    default: 'AgronomyFarm'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - 'AgronomyFarm'
+        - 'CurtissFarm'
+        - 'Gilbert'
+        - 'WilsonHall'
+
+  ARA_RESOURCE_TYPE:
+    type: string
+    label: 'ARA Resource Type'
+    description: 'Choose an ARA Resource Type.'
+    default: 'AraRAN'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - 'AraRAN'
+
+  ARA_DEVICE_TYPE:
+    type: string
+    label: 'ARA Device Type'
+    description: 'Choose an ARA Device Type.'
+    default: 'BaseStation'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - 'BaseStation'
+
+  ARA_DEVICE_TYPE_MAP:
+    type: json
+    default:
+      BaseStation: 'BS'
+      Compute: 'Compute'
+      Edge: 'Edge'
+      Host: 'Host'
+      UserEquipment: 'UE'
+
+  ARA_DEVICE_ID:
+    type: string
+    label: 'ARA Device ID'
+    description: 'Choose an ARA Device ID.'
+    default: '000'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - '000'
+
+  ARA_IMAGE:
+    type: string
+    label: 'ARA Container Image'
+    description: 'Choose a container image URI from Docker Hub.'
+    default: 'arawirelesshub/ocudu:complete_outdoor_v2'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - 'arawirelesshub/ocudu:complete_outdoor_v1'
+        - 'arawirelesshub/ocudu:complete_outdoor_v2'
+
+  ARA_CPUS:
+    type: number
+    label: 'CPUs'
+    description: 'Set number of CPUs requested.'
+    default: '16'
+    hidden: false
+    immutable: true
+    constraints:
+      - range: { min: 0, max: 16 }
+        description: 'Maximum number of CPUs is currently 16'
+
+  ARA_MEM:
+    type: number
+    label: 'Memory (MiB)'
+    description: 'Set memory requested in MiB.'
+    default: '8192'
+    hidden: false
+    immutable: true
+    constraints:
+      - range: { min: 0, max: 8192 }
+        description: 'Maximum amount of memory is currently 8192 MiB'
+
+  ARA_NETWORK:
+    type: string
+    label: 'ARA Network'
+    description: 'Choose a network.'
+    default: 'ARA_Shared_Net'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - 'ARA_Shared_Net'
+
+  ARA_SUBNET:
+    type: string
+    label: 'ARA Subnet'
+    description: 'Choose a subnet.'
+    default: 'ARA_Shared_Subnet'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - 'ARA_Shared_Subnet'
+
+  GNB_SDR_INTERFACE_IP:
+    type: string
+    label: 'gNB SDR Interface IP Address'
+    description: 'Select the IP address of the AraRAN Base Station (gNB) SDR sector.'
+    default: '192.168.20.2'
+    hidden: false
+    immutable: true
+    constraints:
+      - allowed_values:
+        - '192.168.20.2'
+        - '192.168.30.2'
+        - '192.168.40.2'
+
+resources:
+
+  lease_0:
+    type: OS::Blazar::Lease
+    properties:
+      name:
+        list_join: ['_', [ 'ARA', { get_param: ARA_SITE_NAME }, { get_param: ARA_RESOURCE_TYPE }, { get_param: ARA_DEVICE_TYPE }, { get_param: ARA_DEVICE_ID } ]]
+      start_date: ''
+      end_date: ''
+      reservations:
+      - resource_properties:
+          str_replace:
+            template: '["and", ["==", "$Site", "ARA_SITE_NAME"], ["==", "$Resource_Type", "ARA_RESOURCE_TYPE"], ["==", "$Device_Type", "ARA_DEVICE_TYPE"], ["==", "$Device_ID", "ARA_DEVICE_ID"]]'
+            params:
+              ARA_SITE_NAME: { get_param: ARA_SITE_NAME }
+              ARA_RESOURCE_TYPE: { get_param: ARA_RESOURCE_TYPE }
+              ARA_DEVICE_TYPE: { get_param: ARA_DEVICE_TYPE }
+              ARA_DEVICE_ID: { get_param: ARA_DEVICE_ID }
+
+  port_0:
+    type: OS::Neutron::Port
+    depends_on:
+    - lease_0
+    properties:
+      network: { get_param: ARA_NETWORK }
+      fixed_ips:
+      - subnet: { get_param: ARA_SUBNET }
+      port_security_enabled: false
+
+  floating_ip_0:
+    type: OS::Neutron::FloatingIP
+    depends_on:
+    - lease_0
+    - port_0
+    properties:
+      floating_network: 'public1'
+      floating_subnet: 'public1-subnet'
+
+  floating_ip_association_0:
+    type: OS::Neutron::FloatingIPAssociation
+    depends_on:
+    - lease_0
+    - port_0
+    - floating_ip_0
+    properties:
+      floatingip_id: { get_resource: floating_ip_0 }
+      port_id: { get_resource: port_0 }
+
+  container_0:
+    type: OS::Zun::Container
+    depends_on:
+    - lease_0
+    - port_0
+    - floating_ip_0
+    - floating_ip_association_0
+    properties:
+      name:
+        list_join: ['_', [ 'ARA', { get_param: ARA_SITE_NAME }, { get_param: ARA_RESOURCE_TYPE }, { get_param: ARA_DEVICE_TYPE }, { get_param: ARA_DEVICE_ID } ]]
+      image: { get_param: ARA_IMAGE }
+      image_driver: 'docker'
+      image_pull_policy: 'always'
+      restart_policy: 'no'
+      hints:
+        host_name:
+          list_join: ['-', [ { get_param: ARA_SITE_NAME }, { get_param: [ARA_DEVICE_TYPE_MAP, {get_param: ARA_DEVICE_TYPE}] }, { get_param: ARA_DEVICE_ID } ]]
+      cpu: { get_param: ARA_CPUS }
+      memory: { get_param: ARA_MEM }
+      hostname:
+        list_join: ['-', [ { get_param: ARA_SITE_NAME }, { get_param: ARA_DEVICE_TYPE }, { get_param: ARA_DEVICE_ID } ]]
+      networks:
+        - port: { get_resource: port_0 }
+      interactive: True
+      security_groups: [ 'default' ]
+      command:
+        str_replace:
+          template: /bin/bash -c >-"
+            sleep 10;
+
+            declare -xr TZ='UTC';
+            declare -xr LC_ALL='C';
+            declare -xr DEBIAN_FRONTEND='noninteractive';
+
+            declare -xir UNIX_TIME=$(date +'%s');
+            declare -xr LOCAL_TIME=$(date +'%Y%m%dT%H%M%S%z');
+
+            ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime && echo ${TZ} > /etc/timezone;
+
+            echo 'Acquire::ForceIPv4 "true";' | tee /etc/apt/apt.conf.d/99force-ipv4;
+            sed -i 's|http:|https:|g' /etc/apt/sources.list.d/ubuntu.sources;
+
+            apt-get -y clean all;
+
+            apt-get -y update && apt-get -y upgrade;
+            apt-get -y update && apt-get -y upgrade;
+
+            apt-get -y autoremove;
+
+            apt-get -y install apt-utils;
+            apt-get -y install curl;
+            apt-get -y install git;
+            apt-get -y install gnupg;
+            apt-get -y install hwloc;
+            apt-get -y install less;
+            apt-get -y install openssh-server;
+            apt-get -y install plocate;
+            apt-get -y install python-is-python3;
+            apt-get -y install sudo;
+            apt-get -y install sysstat;
+            apt-get -y install vim;
+            apt-get -y install wget;
+
+            apt-get -y install ubuntu-server;
+
+            curl -o /etc/apt/sources.list.d/perfsonar-release.list https://downloads.perfsonar.net/debian/perfsonar-release.list;
+            curl -s -o /etc/apt/trusted.gpg.d/perfsonar-release.gpg.asc https://downloads.perfsonar.net/debian/perfsonar-release.gpg.key;
+
+            apt-get -y update && apt-get -y upgrade;
+
+            apt-get -y install dnsutils;
+            apt-get -y install iproute2;
+            apt-get -y install net-tools;
+            apt-get -y install nmap;
+            apt-get -y install ntp;
+            apt-get -y install ntpstat;
+            apt-get -y install perfsonar-tools;
+            apt-get -y install perfsonar-toolkit-ntp;
+
+            /usr/lib/perfsonar/scripts/configure_ntpd new;
+
+            mkdir -p /opt/bin;
+            cd /opt/bin;
+
+            wget https://github.com/kellyjonbrazil/jc/releases/download/v1.25.6/jc-1.25.6-linux-x86_64.tar.gz;
+            tar -xf jc-1.25.6-linux-x86_64.tar.gz;
+            rm jc-1.25.6-linux-x86_64.tar.gz;
+            chmod 755 jc;
+            chown root:root jc;
+
+            cd ~/;
+
+            rm -rf ~/docker_images/;
+            rm -rf ~/flexric/;
+            rm -rf ~/oran-sc-ric/;
+            rm -rf ~/srsRAN_Project/;
+            rm -rf ~/swig/;
+
+            rm -rf ~/.gnupg/;
+            rm -rf ~/.local/;
+            rm -rf ~/.dotnet/;
+            rm -rf ~/.config/;
+            rm -rf ~/.cache/;
+            rm -rf ~/.copilot/;
+            rm -rf ~/.claude/;
+            rm -rf ~/.vscode-server/;
+
+            rm ~/.claude.json;
+            rm ~/.gitconfig;
+            rm /etc/gitconfig;
+
+            cp -p ~/ocudu/build/apps/gnb/gnb_x310_tdd_n78_40mhz.yaml ./;
+
+            cp -p ~/ocudu/build/apps/gnb/gnb_n320_tdd_n78_40mhz.yaml ./;
+            cp -p ~/ocudu/build/apps/du/du_n320_tdd_n78_40mhz.yaml ./;
+            cp -p ~/ocudu/build/apps/cu/cu_n320_tdd_n78_40mhz.yaml ./;
+
+            rm ~/.ocudu_fftwisdom;
+            mv ~/ocudu/ ~/ocudu.bak/;
+
+            git config --global user.name 'kaiair';
+            git config --global user.email 'kaiair@icicle.ai';
+
+            git clone https://github.com/ICICLE-ai/kaiair.git;
+            git clone https://github.com/ocudu/ocudu.git;
+
+            ./kaiair/scripts/apply_patches.sh ocudu ./ocudu;
+
+            cd ocudu && mkdir build && cd build; 
+            cmake -DCMAKE_BUILD_TYPE=Release ..;
+            make -j16 gnb;
+
+            make -j16 $(ls ../tests/unittests/scheduler/kaiair | grep _test | sed 's/\.cpp//');
+            ctest -R pktr;
+
+            cd ~/;
+
+            declare -xr CN_INTERFACE_IP=$(ip -br addr show eth4 | awk '{print $3}' | cut -d/ -f1);
+            ~/add_route.sh $CN_INTERFACE_IP;
+            ping -c 10 -I eth4 10.189.8.8;
+
+            perl -pi -e 's|10.189.3.112|$ENV{CN_INTERFACE_IP}|g' gnb_n320_tdd_n78_40mhz.yaml;
+            sed -i 's|192.168.30.2|GNB_SDR_INTERFACE_IP|' gnb_n320_tdd_n78_40mhz.yaml;
+            sed -i 's|enable_du_e2:|enable_du_e2:false|' gnb_n320_tdd_n78_40mhz.yaml;
+            sed -i 's|false true| false|' gnb_n320_tdd_n78_40mhz.yaml;
+            mv ~/gnb_n320_tdd_n78_40mhz.yaml ~/ocudu/build/apps/gnb/;
+
+            mv ~/du_n320_tdd_n78_40mhz.yaml ~/ocudu/build/apps/du/;
+            mv ~/cu_n320_tdd_n78_40mhz.yaml ~/ocudu/build/apps/cu/;
+
+            cp kaiair/codesign-api/agent.gnb.example.json agent.gnb.json;
+            sed -i 's|path/to|root|' agent.gnb.json;
+            sed -i 's|gnb.yaml|gnb_n320_tdd_n78_40mhz.yaml|' agent.gnb.json;
+
+            useradd -m LOGIN_USERNAME;
+            usermod -aG sudo LOGIN_USERNAME;
+            usermod -s /bin/bash LOGIN_USERNAME;
+            sed -i 's/%sudo\tALL=(ALL:ALL)/%sudo ALL=(ALL) NOPASSWD:/' /etc/sudoers;
+
+            runuser -u LOGIN_USERNAME -- mkdir -p /home/LOGIN_USERNAME/.ssh;
+            runuser -u LOGIN_USERNAME -- echo 'SSH_PUBLIC_KEY' > /home/LOGIN_USERNAME/.ssh/authorized_keys;
+            runuser -u LOGIN_USERNAME -- chmod 700 /home/LOGIN_USERNAME/.ssh;
+
+            updatedb;
+
+            service ntp restart;
+            service ssh restart;
+
+            uhd_find_devices;
+
+            rm .bash_history;
+
+            python3 kaiair/codesign-api/kaiair_agent.py --role gnb --config agent.gnb.json;"
+          params:
+            LOGIN_USERNAME: { get_param: LOGIN_USERNAME }
+            SSH_PUBLIC_KEY: { get_param: SSH_PUBLIC_KEY }
+            GNB_SDR_INTERFACE_IP: { get_param: GNB_SDR_INTERFACE_IP}
